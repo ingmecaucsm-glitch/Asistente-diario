@@ -5,7 +5,7 @@
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
@@ -260,6 +260,17 @@ function vistaInicio() {
     </section>`;
   }
 
+  const ymPrev = sumarMes(ym, -1);
+  if (gastosDelMes(ymPrev).length && db.ajustes.reporteAvisado !== ymPrev) {
+    html += `<section class="aviso info">
+      <p><strong>Tu reporte de ${MESES[Number(ymPrev.slice(5)) - 1]} está listo.</strong> Descárgalo en Excel.</p>
+      <div class="aviso-botones">
+        <button class="btn-sm primary" data-action="excel" data-periodo="${ymPrev}">Descargar Excel</button>
+        <button class="link" data-action="omitir-reporte" data-periodo="${ymPrev}">Ahora no</button>
+      </div>
+    </section>`;
+  }
+
   html += `<section class="card resumen" data-action="tab" data-tab="gastos" role="button" tabindex="0">
     <p class="muted">Gastado en ${MESES[new Date().getMonth()]}</p>
     <p class="cifra">${soles(total)}</p>
@@ -301,6 +312,10 @@ function vistaGastos() {
     <p class="muted">Total del mes</p>
     <p class="cifra">${soles(total)}</p>
     <p class="muted small">≈ ${dolares(total / db.ajustes.tc)} · ${gm.length} ${gm.length === 1 ? 'registro' : 'registros'}</p>
+    <div class="acciones excel">
+      <button class="btn-sm primary" data-action="excel" data-periodo="${ym}" ${gm.length ? '' : 'disabled'}>Excel de ${MESES[Number(ym.slice(5)) - 1]}</button>
+      <button class="btn-sm ghost" data-action="excel" data-periodo="${ym.slice(0, 4)}">Excel del año ${ym.slice(0, 4)}</button>
+    </div>
     ${cats.length ? `<div class="barras">${cats.map(([c, v]) => `
       <div class="barra">
         <div class="barra-txt"><span>${esc(c)}</span><span>${soles(v)} <span class="muted">· ${Math.round(v / total * 100)}%</span></span></div>
@@ -646,17 +661,183 @@ function toggleTarea(id) {
   render();
 }
 
+/* ---------- descargas ---------- */
+function descargarBlob(blob, nombre) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = nombre;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+/* ---------- reporte en Excel ---------- */
+function cargarExcelJS() {
+  if (window.ExcelJS) return Promise.resolve();
+  return new Promise((ok, falla) => {
+    const s = document.createElement('script');
+    s.src = 'lib/exceljs.min.js';
+    s.onload = ok;
+    s.onerror = () => falla(new Error('No se pudo cargar ExcelJS'));
+    document.head.appendChild(s);
+  });
+}
+
+// periodo: 'AAAA-MM' (un mes) o 'AAAA' (un año)
+async function descargarExcel(periodo) {
+  toast('Preparando Excel…');
+  try { await cargarExcelJS(); } catch (e) { toast('No se pudo preparar el Excel. Revisa tu conexión.'); return; }
+
+  const esAnio = periodo.length === 4;
+  const anterior = esAnio ? String(Number(periodo) - 1) : sumarMes(periodo, -1);
+  const delPeriodo = per => db.gastos.filter(g => g.fecha.startsWith(per));
+  const gastos = delPeriodo(periodo).sort((a, b) => a.fecha.localeCompare(b.fecha) || (a.creado || '').localeCompare(b.creado || ''));
+  const gastosAnt = delPeriodo(anterior);
+  const nombre = esAnio ? 'año ' + periodo : nombreMes(periodo);
+  const nombreAnt = esAnio ? anterior : MESES[Number(anterior.slice(5)) - 1];
+  const tc = db.ajustes.tc;
+
+  const total = suma(gastos.map(enSoles));
+  const totalAnt = suma(gastosAnt.map(enSoles));
+  const hoy = hoyStr();
+  let dias;
+  if (esAnio) {
+    const y = Number(periodo);
+    dias = hoy.startsWith(periodo) ? diasEntre(`${periodo}-01-01`, hoy) + 1 : (new Date(y, 1, 29).getDate() === 29 ? 366 : 365);
+  } else {
+    const [y, m] = periodo.split('-').map(Number);
+    dias = hoy.startsWith(periodo) ? Number(hoy.slice(8)) : new Date(y, m, 0).getDate();
+  }
+
+  const VERDE = 'FF0F766E', ZEBRA = 'FFF1F6F5', GRIS = 'FF5D6A66';
+  const F_S = '"S/" #,##0.00', F_U = '"US$" #,##0.00', F_P = '0.0%', F_N = '0', F_TC = '0.000';
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'Mi Secretaria';
+  wb.created = new Date();
+
+  /* Hoja 1: Resumen */
+  const ws = wb.addWorksheet('Resumen', { views: [{ showGridLines: false }] });
+  ws.columns = [{ width: 30 }, { width: 18 }, { width: 14 }, { width: 14 }, { width: 18 }];
+  const t = ws.addRow([`Reporte de gastos — ${nombre}`]);
+  t.font = { bold: true, size: 16, color: { argb: VERDE } };
+  ws.addRow([`Generado el ${fechaLarga(hoy).toLowerCase()} · Tipo de cambio: US$ 1 = S/ ${tc.toFixed(3)}`]).font = { color: { argb: GRIS } };
+  ws.addRow([]);
+
+  const kv = (etiqueta, valor, formato) => {
+    const r = ws.addRow([etiqueta, valor]);
+    r.getCell(1).font = { color: { argb: GRIS } };
+    r.getCell(2).font = { bold: true };
+    if (formato) r.getCell(2).numFmt = formato;
+  };
+  kv('Total gastado', total, F_S);
+  kv('Equivalente en dólares', total / tc, F_U);
+  kv('Número de registros', gastos.length, F_N);
+  kv('Promedio por día', dias ? total / dias : 0, F_S);
+  kv(`Total ${esAnio ? 'del año' : 'de'} ${nombreAnt}`, totalAnt, F_S);
+  if (totalAnt > 0) kv('Variación frente al período anterior', (total - totalAnt) / totalAnt, '+0.0%;-0.0%;0.0%');
+
+  function tabla(titulo, encabezados, filas, formatos, filaTotal) {
+    ws.addRow([]);
+    ws.addRow([titulo]).font = { bold: true, size: 12 };
+    const h = ws.addRow(encabezados);
+    h.eachCell(c => {
+      c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE } };
+    });
+    const inicio = h.number + 1;
+    filas.forEach((f, i) => {
+      const r = ws.addRow(f);
+      formatos.forEach((fm, j) => { if (fm) r.getCell(j + 1).numFmt = fm; });
+      if (i % 2) for (let j = 1; j <= encabezados.length; j++) r.getCell(j).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: ZEBRA } };
+    });
+    if (filaTotal && filas.length) {
+      const r = ws.addRow(filaTotal(inicio, inicio + filas.length - 1));
+      r.font = { bold: true };
+      formatos.forEach((fm, j) => { if (fm) r.getCell(j + 1).numFmt = fm; });
+      for (let j = 1; j <= encabezados.length; j++) r.getCell(j).border = { top: { style: 'thin', color: { argb: VERDE } } };
+    }
+  }
+  const sumaCol = (col, i, f, valor) => ({ formula: `SUM(${col}${i}:${col}${f})`, result: valor });
+
+  // Por categoría
+  const porCat = {}, porCatAnt = {}, nCat = {};
+  gastos.forEach(g => { porCat[g.categoria] = (porCat[g.categoria] || 0) + enSoles(g); nCat[g.categoria] = (nCat[g.categoria] || 0) + 1; });
+  gastosAnt.forEach(g => { porCatAnt[g.categoria] = (porCatAnt[g.categoria] || 0) + enSoles(g); });
+  const cats = Object.entries(porCat).sort((a, b) => b[1] - a[1]);
+  tabla('Gastos por categoría',
+    ['Categoría', 'Total (S/)', '% del total', 'Registros', `${capital(nombreAnt)} (S/)`],
+    cats.map(([c, v]) => [c, v, total ? v / total : 0, nCat[c], porCatAnt[c] || 0]),
+    [null, F_S, F_P, F_N, F_S],
+    (i, f) => ['Total', sumaCol('B', i, f, total), total ? 1 : 0, sumaCol('D', i, f, gastos.length), sumaCol('E', i, f, suma(cats.map(([c]) => porCatAnt[c] || 0)))]);
+
+  if (esAnio) {
+    const filas = [];
+    for (let m = 1; m <= 12; m++) {
+      const ym = `${periodo}-${pad(m)}`;
+      const gm = delPeriodo(ym);
+      filas.push([capital(MESES[m - 1]), suma(gm.map(enSoles)), gm.length]);
+    }
+    tabla('Gastos por mes', ['Mes', 'Total (S/)', 'Registros'], filas, [null, F_S, F_N],
+      (i, f) => ['Total', sumaCol('B', i, f, total), sumaCol('C', i, f, gastos.length)]);
+  } else {
+    const pagos = db.pagos.filter(p => p.activo !== false || (p.pagados && p.pagados[periodo]))
+      .map(p => estadoPago(p, periodo)).sort((a, b) => a.p.dia - b.p.dia);
+    if (pagos.length) {
+      const pagado = suma(pagos.filter(e => e.pagado).map(e => enSoles(e.gasto)));
+      tabla('Pagos fijos del mes', ['Pago', 'Vence', 'Estado', 'Tipo', 'Monto pagado (S/)'],
+        pagos.map(e => [e.p.nombre, fechaCorta(e.vence), e.pagado ? 'Pagado' : 'Pendiente', e.p.tipo, e.pagado ? enSoles(e.gasto) : null]),
+        [null, null, null, null, F_S],
+        (i, f) => ['Total pagado', '', '', '', sumaCol('E', i, f, pagado)]);
+    }
+  }
+
+  /* Hoja 2: Detalle */
+  const wd = wb.addWorksheet('Detalle', { views: [{ state: 'frozen', ySplit: 1 }] });
+  wd.columns = [
+    { header: 'Fecha', key: 'fecha', width: 12, style: { numFmt: 'dd/mm/yyyy' } },
+    { header: 'Categoría', key: 'categoria', width: 20 },
+    { header: 'Detalle', key: 'nota', width: 32 },
+    { header: 'Moneda', key: 'moneda', width: 9 },
+    { header: 'Monto original', key: 'monto', width: 16 },
+    { header: 'Tipo de cambio', key: 'tc', width: 15, style: { numFmt: F_TC } },
+    { header: 'Monto en S/', key: 'soles', width: 15, style: { numFmt: F_S } },
+    { header: 'Pago fijo', key: 'fijo', width: 10 }
+  ];
+  wd.getRow(1).eachCell(c => {
+    c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: VERDE } };
+  });
+  gastos.forEach(g => {
+    const [y, m, d] = g.fecha.split('-').map(Number);
+    const r = wd.addRow({
+      fecha: new Date(Date.UTC(y, m - 1, d)),
+      categoria: g.categoria, nota: g.nota || '', moneda: g.moneda === 'USD' ? 'US$' : 'S/',
+      monto: g.monto, tc: g.moneda === 'USD' ? (g.tc || tc) : null, soles: enSoles(g), fijo: g.pagoId ? 'Sí' : ''
+    });
+    r.getCell('monto').numFmt = g.moneda === 'USD' ? F_U : F_S;
+  });
+  if (gastos.length) {
+    const fin = gastos.length + 1;
+    wd.autoFilter = { from: 'A1', to: `H${fin}` };
+    const r = wd.addRow({ categoria: 'Total', soles: { formula: `SUBTOTAL(9,G2:G${fin})`, result: total } });
+    r.font = { bold: true };
+    r.getCell('soles').numFmt = F_S;
+    r.eachCell({ includeEmpty: true }, c => { c.border = { top: { style: 'thin', color: { argb: VERDE } } }; });
+  }
+
+  const buf = await wb.xlsx.writeBuffer();
+  descargarBlob(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    `Gastos-${periodo}.xlsx`);
+  if (!esAnio && sumarMes(mesStr(new Date()), -1) === periodo) { db.ajustes.reporteAvisado = periodo; guardar(); render(); }
+  toast(`Reporte de ${nombre} descargado`);
+}
+
 /* ---------- respaldo ---------- */
 function exportar() {
   db.ajustes.ultimoRespaldo = hoyStr();
   guardar();
   const blob = new Blob([JSON.stringify({ app: 'mi-secretaria', exportado: new Date().toISOString(), datos: db }, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `mi-secretaria-respaldo-${hoyStr()}.json`;
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+  descargarBlob(blob, `mi-secretaria-respaldo-${hoyStr()}.json`);
   toast('Copia descargada');
   render();
 }
@@ -794,6 +975,8 @@ document.addEventListener('click', e => {
       el.closest('form').fecha.value = f; break;
     }
     case 'exportar': exportar(); break;
+    case 'excel': descargarExcel(el.dataset.periodo); break;
+    case 'omitir-reporte': db.ajustes.reporteAvisado = el.dataset.periodo; guardar(); render(); break;
     case 'importar': $('#archivoImportar').click(); break;
     case 'tc-internet': tcInternet(); break;
     case 'borrar-todo':

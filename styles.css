@@ -98,6 +98,10 @@ main { padding: 4px 16px calc(110px + env(safe-area-inset-bottom)); display: fle
   background: var(--warn-soft); border-radius: var(--radius); padding: 12px 14px;
   display: flex; gap: 12px; align-items: center; justify-content: space-between; font-size: .9rem;
 }
+.aviso.info { background: var(--accent-soft); }
+.aviso-botones { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
+.acciones.excel { margin-top: 12px; }
+button:disabled { opacity: .45; cursor: not-allowed; }
 .resumen { cursor: default; }
 .resumen[data-action] { cursor: pointer; }
 .cifra { font-size: 2rem; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; margin: 2px 0; }

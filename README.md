@@ -7,6 +7,7 @@ App personal para registrar gastos familiares, pagos fijos (tarjetas y servicios
 - **Gastos** en soles (S/) o dólares (US$), con conversión automática, categorías y resumen del mes.
 - **Pagos fijos**: tarjetas, luz, agua, internet… avisa cuántos días faltan y al pagar se registra como gasto.
 - **Pendientes** por área (Hogar, Trabajo, Personal, Familia), con fecha, prioridad y repetición.
+- **Reportes en Excel**: del mes o del año, desde la pestaña Gastos. Al empezar cada mes la app ofrece el reporte del mes anterior.
 - **Copia de seguridad**: descargar/restaurar un archivo `.json`.
 
 ## Dónde se guardan los datos
@@ -29,4 +30,5 @@ Doble clic en `index.html` (funciona todo excepto el modo sin internet).
 - `styles.css` – diseño (modo claro y oscuro automático)
 - `app.js` – toda la lógica
 - `sw.js` – permite usarla sin internet
+- `lib/exceljs.min.js` – librería para crear los archivos Excel (licencia MIT, ver `lib/exceljs-LICENSE.txt`)
 - `manifest.webmanifest`, `icons/` – para instalarla como app
