@@ -12,7 +12,9 @@ App personal para registrar gastos familiares, pagos fijos (tarjetas y servicios
 - **Copia de seguridad**: descargar/restaurar un archivo `.json`.
 
 ## Dónde se guardan los datos
-En el propio dispositivo (navegador). **Descarga una copia con frecuencia** desde Ajustes y guárdala
+En el propio dispositivo y, si entras con Google (Ajustes → Sincronización), también en Firebase:
+así el celular y la laptop tienen los mismos datos y puedes compartirlos con un familiar.
+Sin sesión iniciada, se guardan solo en el dispositivo. **Descarga una copia con frecuencia** desde Ajustes y guárdala
 en Google Drive o en tu correo. Esa copia también sirve para pasar los datos de la laptop al celular.
 
 ## Cómo publicarla gratis (GitHub Pages)
@@ -31,5 +33,8 @@ Doble clic en `index.html` (funciona todo excepto el modo sin internet).
 - `styles.css` – diseño (modo claro y oscuro automático)
 - `app.js` – toda la lógica
 - `sw.js` – permite usarla sin internet
+- `sync.js` – sincronización con Firebase; `firebase-config.js` – datos del proyecto Firebase
+- `firestore.rules` – reglas de seguridad para pegar en Firebase → Firestore → Reglas
+- `lib/firebase/` – librería de Firebase (licencia Apache 2.0)
 - `lib/exceljs.min.js` – librería para crear los archivos Excel (licencia MIT, ver `lib/exceljs-LICENSE.txt`)
 - `manifest.webmanifest`, `icons/` – para instalarla como app

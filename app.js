@@ -5,7 +5,7 @@
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '2.0.0';
 
 const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
@@ -91,9 +91,15 @@ function cargar() {
   } catch (e) { console.warn('No se pudieron leer los datos', e); }
   return nuevoDb();
 }
-function guardar() {
+function guardarLocal() {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); return true; }
   catch (e) { toast('⚠ No se pudo guardar en este dispositivo'); return false; }
+}
+// Guarda en el dispositivo y, si la sincronización está activa, sube los cambios
+function guardar() {
+  const ok = guardarLocal();
+  if (window.Sync) window.Sync.empujar();
+  return ok;
 }
 
 let db = cargar();
@@ -399,7 +405,11 @@ function vistaTareas() {
 function vistaAjustes() {
   const a = db.ajustes;
   const n = { g: db.gastos.length, p: db.pagos.length, t: db.tareas.length };
-  return `<form id="fAjustes" class="card form">
+  const sync = window.Sync ? window.Sync.htmlAjustes()
+    : `<h3>Sincronización</h3><p class="muted small">${window.FIREBASE_CONFIG ? 'Cargando…' : 'Aún no está configurada.'}</p>`;
+  return `<section class="card form">${sync}</section>
+
+  <form id="fAjustes" class="card form">
     <h3>Tipo de cambio</h3>
     <p class="muted small">Se usa para convertir gastos en dólares a soles. ${a.tcFecha ? 'Actualizado el ' + fechaCorta(a.tcFecha) + '.' : 'Aún no lo has actualizado.'}</p>
     <div class="fila-form">
@@ -414,8 +424,9 @@ function vistaAjustes() {
 
   <section class="card form">
     <h3>Copia de seguridad</h3>
-    <p class="muted small">Tus datos se guardan <strong>solo en este dispositivo</strong>. Descarga una copia con frecuencia
-      (guárdala en Google Drive o en tu correo). También sirve para pasar tus datos de la laptop al celular.
+    <p class="muted small">${window.Sync && window.Sync.estado === 'activo'
+      ? 'Tus datos ya se respaldan en la nube. Esta copia es un respaldo extra que puedes guardar en Drive o en tu correo.'
+      : 'Tus datos se guardan <strong>solo en este dispositivo</strong>. Descarga una copia con frecuencia (guárdala en Google Drive o en tu correo).'}
       ${a.ultimoRespaldo ? 'Última copia: ' + fechaCorta(a.ultimoRespaldo) + '.' : ''}</p>
     <p class="small">${n.g} gastos · ${n.p} pagos fijos · ${n.t} pendientes</p>
     <div class="acciones">
@@ -1158,7 +1169,7 @@ function importar(archivo) {
       const datos = j.datos || j;
       if (!Array.isArray(datos.gastos) || !Array.isArray(datos.tareas) || !Array.isArray(datos.pagos)) throw new Error('formato');
       const resumen = `${datos.gastos.length} gastos, ${datos.pagos.length} pagos fijos y ${datos.tareas.length} pendientes`;
-      if (!confirm(`La copia tiene ${resumen}.\n\nEsto REEMPLAZA todos los datos actuales de este dispositivo. ¿Continuar?`)) return;
+      if (!confirm(`La copia tiene ${resumen}.\n\nEsto REEMPLAZA todos los datos actuales${window.Sync && window.Sync.estado === 'activo' ? ' en todos tus dispositivos sincronizados' : ' de este dispositivo'}. ¿Continuar?`)) return;
       db = normalizar(datos);
       guardar();
       toast('Datos restaurados');
@@ -1286,13 +1297,18 @@ document.addEventListener('click', e => {
     }
     case 'exportar': exportar(); break;
     case 'voz': case 'voz-reintentar': escuchar(); break;
+    case 'sync-entrar': if (window.Sync) window.Sync.entrar(); break;
+    case 'sync-salir': if (window.Sync) window.Sync.salir(); break;
+    case 'sync-quitar': if (window.Sync) window.Sync.quitarAcceso(el.dataset.email); break;
     case 'voz-como': procesarVoz(estado.vozTexto, el.dataset.tipo); break;
     case 'excel': descargarExcel(el.dataset.periodo); break;
     case 'omitir-reporte': db.ajustes.reporteAvisado = el.dataset.periodo; guardar(); render(); break;
     case 'importar': $('#archivoImportar').click(); break;
     case 'tc-internet': tcInternet(); break;
     case 'borrar-todo':
-      if (!confirm('¿Borrar TODOS los datos de este dispositivo?')) return;
+      if (!confirm(window.Sync && window.Sync.estado === 'activo'
+        ? '¿Borrar TODOS los datos? Se borrarán también en la nube y en todos tus dispositivos sincronizados.'
+        : '¿Borrar TODOS los datos de este dispositivo?')) return;
       if (prompt('Escribe BORRAR para confirmar') !== 'BORRAR') return;
       db = nuevoDb(); guardar(); toast('Datos borrados'); estado.tab = 'inicio'; render(); break;
   }
@@ -1308,6 +1324,7 @@ document.addEventListener('submit', e => {
     case 'fPago': guardarPagoFijo(f, fd); break;
     case 'fPagar': registrarPago(f, fd); break;
     case 'fVoz': procesarVoz(fd.texto); break;
+    case 'fCompartir': if (window.Sync) window.Sync.compartir(fd.email).then(() => f.reset()); break;
     case 'fRapida': {
       const titulo = (fd.titulo || '').trim();
       if (!titulo) return;
@@ -1352,6 +1369,13 @@ render();
   else if (accion === 'tarea') abrirSheet(formTarea());
 })();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+if (window.FIREBASE_CONFIG) {
+  import('./sync.js').then(m => m.iniciar()).catch(e => {
+    console.warn('Sincronización no disponible', e);
+    const chip = $('#syncChip');
+    if (chip) { chip.hidden = false; chip.className = 'sync-chip error'; chip.title = 'No se pudo cargar la sincronización'; }
+  });
+}
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }

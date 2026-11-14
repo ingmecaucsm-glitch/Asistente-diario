@@ -1,0 +1,31 @@
+rules_version = '2';
+// Reglas de seguridad de Mi Secretaria.
+// Cada "hogar" tiene una lista de correos (emails) que pueden ver y editar sus datos.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function correo() {
+      return request.auth.token.email.lower();
+    }
+    function autenticado() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function esMiembro(hogarId) {
+      return autenticado() &&
+        correo() in get(/databases/$(database)/documents/hogares/$(hogarId)).data.emails;
+    }
+
+    match /hogares/{hogarId} {
+      allow read: if autenticado() && correo() in resource.data.emails;
+      allow create: if autenticado() && hogarId == request.auth.uid
+        && request.resource.data.dueno == request.auth.uid
+        && correo() in request.resource.data.emails;
+      allow update: if autenticado() && resource.data.dueno == request.auth.uid
+        && request.resource.data.dueno == resource.data.dueno;
+      allow delete: if false;
+
+      match /{coleccion}/{docId} {
+        allow read, write: if esMiembro(hogarId);
+      }
+    }
+  }
+}

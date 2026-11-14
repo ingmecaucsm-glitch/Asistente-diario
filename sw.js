@@ -1,9 +1,10 @@
 // Service worker: permite abrir la app sin internet.
 // Estrategia "red primero": si hay internet carga siempre la versión más nueva;
 // si no hay, usa la copia guardada.
-const CACHE = 'misecretaria-v3';
+const CACHE = 'misecretaria-v4';
 const ARCHIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
-  'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'lib/exceljs.min.js'];
+  'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'lib/exceljs.min.js',
+  'firebase-config.js', 'sync.js', 'lib/firebase/firebase-app.js', 'lib/firebase/firebase-auth.js', 'lib/firebase/firebase-firestore.js'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ARCHIVOS)).then(() => self.skipWaiting()));

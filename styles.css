@@ -72,9 +72,20 @@ h1, h2, h3, p { margin: 0; }
 }
 .topbar h1 { font-size: 1.35rem; flex: 1; }
 .tc-chip {
-  border: 1px solid var(--border); background: var(--surface); border-radius: 999px;
+  border: 1px solid var(--border); flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; background: var(--surface); border-radius: 999px;
   padding: 4px 10px; font-size: .78rem; color: var(--muted); white-space: nowrap;
 }
+.sync-chip {
+  position: relative; border: 0; background: transparent; width: 36px; height: 36px; border-radius: 50%;
+  display: grid; place-items: center; color: var(--muted); flex-shrink: 0;
+}
+.sync-chip::after {
+  content: ""; position: absolute; right: 4px; bottom: 6px; width: 9px; height: 9px; border-radius: 50%;
+  border: 2px solid var(--bg); background: var(--muted);
+}
+.sync-chip.ok { color: var(--ok); } .sync-chip.ok::after { background: var(--ok); }
+.sync-chip.pend { color: var(--warn); } .sync-chip.pend::after { background: var(--warn); }
+.sync-chip.error { color: var(--danger); } .sync-chip.error::after { background: var(--danger); }
 .icon-btn {
   border: 0; background: transparent; width: 40px; height: 40px; border-radius: 50%;
   display: grid; place-items: center; font-size: 1.5rem; color: var(--muted);
