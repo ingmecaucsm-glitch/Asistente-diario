@@ -1,4 +1,4 @@
-# Mi Secretaria
+# Asistente Hogar
 
 App personal para registrar gastos familiares, pagos fijos (tarjetas y servicios) y pendientes
 (trabajo, hogar, encargos). Funciona en laptop y celular Android, también sin internet.
@@ -18,10 +18,10 @@ Sin sesión iniciada, se guardan solo en el dispositivo. **Descarga una copia co
 en Google Drive o en tu correo. Esa copia también sirve para pasar los datos de la laptop al celular.
 
 ## Cómo publicarla gratis (GitHub Pages)
-1. Crea una cuenta en https://github.com y un repositorio nuevo, por ejemplo `mi-secretaria`.
+1. Crea una cuenta en https://github.com y un repositorio nuevo, por ejemplo `Asistente-diario`.
 2. Sube todos los archivos de esta carpeta (botón *Add file → Upload files*).
 3. En el repositorio: *Settings → Pages → Branch: main / root → Save*.
-4. En 1–2 minutos tendrás una dirección como `https://TU-USUARIO.github.io/mi-secretaria/`.
+4. En 1–2 minutos tendrás una dirección como `https://TU-USUARIO.github.io/Asistente-diario/`.
 5. **Celular Android**: abre esa dirección en Chrome → menú ⋮ → *Agregar a pantalla principal / Instalar app*.
 6. **Laptop**: ábrela en Chrome o Edge → ícono de instalar en la barra de direcciones.
 

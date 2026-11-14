@@ -1,6 +1,6 @@
 {
-  "name": "Mi Secretaria",
-  "short_name": "Secretaria",
+  "name": "Asistente Hogar",
+  "short_name": "Asistente Hogar",
   "description": "Registro personal de gastos, pagos fijos y pendientes.",
   "lang": "es-PE",
   "start_url": "./",

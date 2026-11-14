@@ -1,11 +1,11 @@
 'use strict';
 
 /* =========================================================
-   Mi Secretaria — v1 (registro simple, datos en el dispositivo)
+   Asistente Hogar — app de gastos, pagos y pendientes del hogar
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '2.1.0';
 
 const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
@@ -441,7 +441,7 @@ function vistaAjustes() {
     <p class="muted small">Borra todos los datos de este dispositivo. Descarga una copia antes.</p>
     <div class="acciones"><button class="btn danger" data-action="borrar-todo">Borrar todo</button></div>
   </section>
-  <p class="muted small centro">Mi Secretaria v${APP_VERSION}</p>`;
+  <p class="muted small centro">Asistente Hogar v${APP_VERSION}</p>`;
 }
 
 const VISTAS = {
@@ -883,7 +883,7 @@ function interpretar(texto, forzar) {
   let prev;
   do {
     prev = t.n;
-    t.quitar(/^\s*(?:oye|por favor|porfa|ok|bueno|claude|secretaria)?[\s,]*(?:recuerdame|recordarme|recuerda(?:me)?|acuerdame|no (?:me )?olvides(?: de)?|no olvidar|no me olvide(?: de)?|anota(?:r)?(?: que)?|apunta(?:r)?(?: que)?|agrega(?:r)?(?: una tarea| un pendiente)?|agendar|agenda|nueva tarea|nuevo pendiente|pendiente|tarea|tengo que|tenemos que|hay que|debo|debemos|que|de|para)\b[\s,:]*/);
+    t.quitar(/^\s*(?:oye|por favor|porfa|ok|bueno|claude|secretaria|asistente)?[\s,]*(?:recuerdame|recordarme|recuerda(?:me)?|acuerdame|no (?:me )?olvides(?: de)?|no olvidar|no me olvide(?: de)?|anota(?:r)?(?: que)?|apunta(?:r)?(?: que)?|agrega(?:r)?(?: una tarea| un pendiente)?|agendar|agenda|nueva tarea|nuevo pendiente|pendiente|tarea|tengo que|tenemos que|hay que|debo|debemos|que|de|para)\b[\s,:]*/);
   } while (t.n !== prev);
   const area = buscarClave(n0, CLAVES_AREA) || 'Personal';
   return { tipo: 'tarea', datos: { titulo: limpiarFrase(t.o).slice(0, 120), fecha, prioridad, repetir, area } };
@@ -1032,7 +1032,7 @@ async function descargarExcel(periodo) {
   const VERDE = 'FF0F766E', ZEBRA = 'FFF1F6F5', GRIS = 'FF5D6A66';
   const F_S = '"S/" #,##0.00', F_U = '"US$" #,##0.00', F_P = '0.0%', F_N = '0', F_TC = '0.000';
   const wb = new ExcelJS.Workbook();
-  wb.creator = 'Mi Secretaria';
+  wb.creator = 'Asistente Hogar';
   wb.created = new Date();
 
   /* Hoja 1: Resumen */
@@ -1156,8 +1156,8 @@ async function descargarExcel(periodo) {
 function exportar() {
   db.ajustes.ultimoRespaldo = hoyStr();
   guardar();
-  const blob = new Blob([JSON.stringify({ app: 'mi-secretaria', exportado: new Date().toISOString(), datos: db }, null, 2)], { type: 'application/json' });
-  descargarBlob(blob, `mi-secretaria-respaldo-${hoyStr()}.json`);
+  const blob = new Blob([JSON.stringify({ app: 'asistente-hogar', exportado: new Date().toISOString(), datos: db }, null, 2)], { type: 'application/json' });
+  descargarBlob(blob, `asistente-hogar-respaldo-${hoyStr()}.json`);
   toast('Copia descargada');
   render();
 }
@@ -1174,7 +1174,7 @@ function importar(archivo) {
       guardar();
       toast('Datos restaurados');
       render();
-    } catch (e) { alert('El archivo no es una copia válida de Mi Secretaria.'); }
+    } catch (e) { alert('El archivo no es una copia válida de Asistente Hogar.'); }
   };
   lector.readAsText(archivo);
 }
