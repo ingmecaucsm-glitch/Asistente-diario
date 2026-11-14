@@ -5,7 +5,7 @@
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 
 const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
@@ -447,6 +447,7 @@ function render() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('activo', b.dataset.tab === estado.tab));
   $('#vista').innerHTML = fn();
   $('#fab').hidden = estado.tab === 'ajustes';
+  $('#fabVoz').hidden = estado.tab === 'ajustes';
   $('#tcChip').textContent = `US$ 1 = S/ ${Number(db.ajustes.tc).toFixed(3)}`;
   if (estado.tab === 'gastos') renderListaGastos();
 }
@@ -463,7 +464,7 @@ function formMenu() {
 
 function formGasto(g, defaults = {}) {
   const nuevo = !g;
-  g = g || { monto: '', moneda: defaults.moneda || 'PEN', categoria: defaults.categoria || ultimaCategoria(), nota: '', fecha: defaults.fecha || hoyStr() };
+  g = g || { monto: defaults.monto || '', moneda: defaults.moneda || 'PEN', categoria: defaults.categoria || ultimaCategoria(), nota: defaults.nota || '', fecha: defaults.fecha || hoyStr() };
   const notas = [...new Set(db.gastos.slice(-200).map(x => x.nota).filter(Boolean))].slice(-30);
   const pago = g.pagoId ? db.pagos.find(p => p.id === g.pagoId) : null;
   return `<h2>${nuevo ? 'Nuevo gasto' : 'Editar gasto'}</h2>
@@ -490,9 +491,9 @@ function formGasto(g, defaults = {}) {
   </form>`;
 }
 
-function formTarea(t) {
+function formTarea(t, pre = {}) {
   const nuevo = !t;
-  t = t || { titulo: '', area: estado.areaTareas !== 'Todas' ? estado.areaTareas : 'Hogar', fecha: '', prioridad: 'media', repetir: 'no', nota: '' };
+  t = t || { titulo: '', area: estado.areaTareas !== 'Todas' ? estado.areaTareas : 'Hogar', fecha: '', prioridad: 'media', repetir: 'no', nota: '', ...pre };
   return `<h2>${nuevo ? 'Nuevo pendiente' : 'Editar pendiente'}</h2>
   <form id="fTarea" class="form" data-id="${nuevo ? '' : t.id}" autocomplete="off">
     <label class="lbl">¿Qué hay que hacer?<input name="titulo" value="${esc(t.titulo)}" required placeholder="Ej. Arreglar la ducha" data-autofocus></label>
@@ -547,17 +548,17 @@ function formPago(p) {
   </form>`;
 }
 
-function formPagar(p, ym) {
+function formPagar(p, ym, pre = {}) {
   const e = estadoPago(p, ym);
   return `<h2>Pagar ${esc(p.nombre)}</h2>
   <p class="muted">Vence el ${fechaLarga(e.vence).toLowerCase()}. Se registrará como gasto.</p>
   <form id="fPagar" class="form" data-id="${p.id}" data-ym="${ym}" autocomplete="off">
     <div class="monto-box">
-      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], p.moneda || 'PEN')}
-      <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${p.monto || ''}" required aria-label="Monto pagado" data-autofocus>
+      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], pre.moneda || p.moneda || 'PEN')}
+      <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${pre.monto || p.monto || ''}" required aria-label="Monto pagado" data-autofocus>
     </div>
     <p class="muted small" id="equiv">&nbsp;</p>
-    <label class="lbl">Fecha de pago<input type="date" name="fecha" value="${hoyStr()}" required></label>
+    <label class="lbl">Fecha de pago<input type="date" name="fecha" value="${pre.fecha || hoyStr()}" required></label>
     <div class="acciones"><span class="spacer"></span><button type="submit" class="btn primary">Marcar como pagado</button></div>
   </form>`;
 }
@@ -659,6 +660,314 @@ function toggleTarea(id) {
   t.actualizado = new Date().toISOString();
   guardar();
   render();
+}
+
+/* ---------- entrada por voz ---------- */
+const norm = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+const NUM = {
+  un: 1, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9, diez: 10,
+  once: 11, doce: 12, trece: 13, catorce: 14, quince: 15, dieciseis: 16, diecisiete: 17, dieciocho: 18, diecinueve: 19,
+  veinte: 20, veintiun: 21, veintiuno: 21, veintidos: 22, veintitres: 23, veinticuatro: 24, veinticinco: 25,
+  veintiseis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29, treinta: 30, cuarenta: 40, cincuenta: 50,
+  sesenta: 60, setenta: 70, ochenta: 80, noventa: 90, cien: 100, ciento: 100, doscientos: 200, trescientos: 300,
+  cuatrocientos: 400, quinientos: 500, seiscientos: 600, setecientos: 700, ochocientos: 800, novecientos: 900
+};
+const PALNUM = Object.keys(NUM).sort((a, b) => b.length - a.length).join('|');
+const MESES_RE = MESES.map(norm).join('|');
+const DIAS_N = DIAS.map(norm);
+
+const CLAVES_CATEGORIA = {
+  'Mercado y comida': 'mercado supermercado comida almuerzo cena desayuno lonche pollo carne pescado verdura verduras fruta frutas pan abarrotes bodega plaza vea tottus metro wong makro restaurante menu delivery chifa polleria cafe leche huevos arroz',
+  'Servicios': 'luz agua internet cable telefono celular gas sedapal enel claro movistar entel bitel recibo recarga plan',
+  'Tarjetas': 'tarjeta visa mastercard credito bcp interbank bbva scotiabank diners amex cuota',
+  'Transporte': 'taxi pasaje pasajes combi bus micro gasolina combustible grifo uber cabify didi indriver estacionamiento cochera peaje carro auto mecanico taller',
+  'Salud': 'farmacia medicina medicinas medicamento doctor medico clinica consulta inkafarma mifarma boticas dentista analisis hospital seguro',
+  'Educación': 'colegio pension universidad curso cursos libro libros utiles matricula academia instituto clases',
+  'Hogar': 'ferreteria limpieza detergente mueble muebles reparacion gasfitero electricista alquiler departamento casa sodimac promart',
+  'Ocio': 'cine netflix spotify disney salida juego juegos viaje cumpleanos regalo fiesta paseo hbo youtube',
+  'Ropa': 'ropa zapatillas zapatos polo polos pantalon camisa casaca vestido saga ripley oechsle'
+};
+const CLAVES_AREA = {
+  'Trabajo': 'trabajo oficina cliente clientes informe reunion jefe proyecto cotizacion presupuesto plano planos obra correo email propuesta factura entrega',
+  'Familia': 'hijo hija hijos mama papa esposa esposo abuela abuelo suegra familia sobrino colegio cumpleanos',
+  'Hogar': 'casa ducha limpiar lavar cocina bano jardin arreglar planchar refrigeradora lavadora foco cuarto sala techo pintar ordenar basura compras'
+};
+function buscarClave(n, mapa, permitidas) {
+  let mejor = null, pos = Infinity;
+  for (const [cat, palabras] of Object.entries(mapa)) {
+    if (permitidas && !permitidas.includes(cat)) continue;
+    for (const w of palabras.split(' ')) {
+      const m = n.match(new RegExp(`\\b${w}\\b`));
+      if (m && m.index < pos) { pos = m.index; mejor = cat; }
+    }
+  }
+  return mejor;
+}
+
+// Texto que se va recortando: se busca en la versión sin tildes y se corta en el original
+function crearTexto(texto) {
+  const o = texto.normalize('NFC').replace(/(\d)([a-zA-Záéíóú])/g, '$1 $2').replace(/(s\/\.?|us\$|\$)\s*(?=\d)/gi, '$1 ');
+  const t = { o, n: norm(o) };
+  t.quitar = re => {
+    const m = t.n.match(re);
+    if (!m) return null;
+    const ini = m.index, fin = m.index + m[0].length;
+    t.o = t.o.slice(0, ini) + ' ' + t.o.slice(fin);
+    t.n = t.n.slice(0, ini) + ' ' + t.n.slice(fin);
+    return m;
+  };
+  return t;
+}
+function valorPalabras(txt) {
+  let total = 0, cur = 0;
+  for (const w of txt.split(/\s+/)) {
+    if (w === 'y') continue;
+    if (w === 'mil') { total += (cur || 1) * 1000; cur = 0; } else cur += NUM[w] || 0;
+  }
+  return total + cur;
+}
+function extraerMonto(t) {
+  const re = new RegExp(`(?:\\b(?:por|de|a|en)\\s+)?(?:(s\\/\\.?|us\\$|\\$|usd)\\s*)?\\b(\\d{1,3}(?:[.,]\\d{3})+|\\d+(?:[.,]\\d{1,2})?|(?:${PALNUM}|mil)(?:\\s+(?:y\\s+)?(?:${PALNUM}|mil))*)\\b(?:\\s*(soles|sol|lucas|luca|dolares|dolar|usd|cocos))?\\b(?:\\s+con\\s+(\\d{1,2})\\b(?:\\s+centimos?)?)?`, 'g');
+  const cands = [];
+  for (const m of t.n.matchAll(re)) {
+    const [, pre, num, suf, dec] = m;
+    let val;
+    if (/^\d{1,3}([.,]\d{3})+$/.test(num)) val = Number(num.replace(/[.,]/g, ''));
+    else if (/^\d/.test(num)) val = Number(num.replace(',', '.'));
+    else {
+      if (/^(un|uno|una)$/.test(num) && !pre && !suf) continue;
+      val = valorPalabras(num);
+    }
+    if (dec) val += Number(dec) / (dec.length === 1 ? 10 : 100);
+    let moneda = null;
+    if (pre) moneda = /^s/.test(pre) ? 'PEN' : 'USD';
+    if (suf) moneda = /^(soles|sol|lucas|luca)$/.test(suf) ? 'PEN' : 'USD';
+    const antes = t.n.slice(0, m.index + (m[0].match(/^(?:(?:por|de|a|en)\s+)/) || [''])[0].length);
+    const despues = t.n.slice(m.index + m[0].length);
+    const esFecha = !moneda && (/\b(el|dia|los|las|del|para el|hasta el|cada)\s*$/.test(antes) || new RegExp(`^\\s*(de|del)\\s+(${MESES_RE})\\b`).test(despues) || /^\s*(dias|semanas|meses|horas|am|pm)\b/.test(despues));
+    cands.push({ val: Math.round(val * 100) / 100, moneda, ini: m.index, fin: m.index + m[0].length, esFecha });
+  }
+  const c = cands.find(x => x.moneda) || cands.find(x => !x.esFecha);
+  if (!c) return null;
+  t.o = t.o.slice(0, c.ini) + ' ' + t.o.slice(c.fin);
+  t.n = t.n.slice(0, c.ini) + ' ' + t.n.slice(c.fin);
+  return c;
+}
+function proximoDia(nombreDia, saltarHoy) {
+  const hoy = new Date();
+  let d = (DIAS_N.indexOf(nombreDia) - hoy.getDay() + 7) % 7;
+  if (d === 0 && saltarHoy) d = 7;
+  return sumarDias(hoyStr(), d);
+}
+function extraerFecha(t, paraGasto) {
+  const hoy = hoyStr();
+  let m;
+  if (paraGasto) {
+    if (t.quitar(/\b(?:el dia de |el )?anteayer\b|\bantes de ayer\b/)) return sumarDias(hoy, -2);
+    if (t.quitar(/\b(?:el dia de )?ayer\b/)) return sumarDias(hoy, -1);
+    t.quitar(/\b(?:el dia de )?hoy\b/);
+    return hoy;
+  }
+  if (t.quitar(/\b(?:para |hasta )?pasado manana\b/)) return sumarDias(hoy, 2);
+  if (t.quitar(/\b(?:para |hasta )?(?<!(?:en|por|de) la )manana\b/)) return sumarDias(hoy, 1);
+  if (t.quitar(/\b(?:para |hasta )?(?:hoy|esta noche|esta tarde)\b/)) return hoy;
+  if ((m = t.quitar(new RegExp(`\\b(?:para |hasta )?(?:el )?(\\d{1,2}) de (${MESES_RE})(?: del? (\\d{4}))?\\b`)))) {
+    const mes = MESES.map(norm).indexOf(m[2]);
+    let y = m[3] ? Number(m[3]) : new Date().getFullYear();
+    let f = `${y}-${pad(mes + 1)}-${pad(Math.min(Number(m[1]), new Date(y, mes + 1, 0).getDate()))}`;
+    if (!m[3] && f < hoy) { y++; f = `${y}-${pad(mes + 1)}-${pad(Number(m[1]))}`; }
+    return f;
+  }
+  if ((m = t.quitar(new RegExp(`\\b(?:para |hasta )?(?:el |este |esta |el proximo |este proximo |el otro |el siguiente )?(${DIAS_N.join('|')})(?: que viene)?\\b`)))) {
+    return proximoDia(m[1], /proximo|otro|siguiente|que viene/.test(m[0]));
+  }
+  if ((m = t.quitar(/\b(?:para |hasta )?el (?:dia )?(\d{1,2})\b/))) {
+    const dia = Number(m[1]);
+    if (dia >= 1 && dia <= 31) {
+      let ym = mesStr(new Date());
+      if (dia < new Date().getDate()) ym = sumarMes(ym, 1);
+      const [y, mm] = ym.split('-').map(Number);
+      return `${ym}-${pad(Math.min(dia, new Date(y, mm, 0).getDate()))}`;
+    }
+  }
+  if ((m = t.quitar(/\ben (\d{1,3}) dias\b/))) return sumarDias(hoy, Number(m[1]));
+  if (t.quitar(/\b(?:para |hasta )?(?:la )?(?:proxima|siguiente|otra) semana\b/)) return sumarDias(hoy, 7);
+  if (t.quitar(/\b(?:para |hasta )?(?:este |el )?fin de semana\b/)) return proximoDia('sabado', false);
+  if (t.quitar(/\b(?:para |hasta |a )?(?:el )?fin de mes\b/)) { const d = new Date(); return fechaStr(new Date(d.getFullYear(), d.getMonth() + 1, 0)); }
+  if (t.quitar(/\b(?:para |hasta )?esta semana\b/)) return proximoDia('viernes', false);
+  return '';
+}
+function limpiarFrase(s) {
+  const STOP = 'de|del|en|por|para|el|la|los|las|un|una|y|que|al|a|es|con|o';
+  let r = s.replace(/\s+/g, ' ').replace(/\s+([,.;:])/g, '$1').trim();
+  let prev;
+  do {
+    prev = r;
+    r = r.replace(new RegExp(`^(?:${STOP})(?:[\\s,]+|$)`, 'i'), '')
+      .replace(new RegExp(`(?:^|[\\s,]+)(?:${STOP})$`, 'i'), '')
+      .replace(/^[\s,.;:¿¡-]+|[\s,.;:?!-]+$/g, '');
+  } while (r !== prev);
+  return r ? r.charAt(0).toUpperCase() + r.slice(1) : '';
+}
+
+const RE_TAREA = /\b(recuerdame|recordarme|recordar|recuerda|acuerdame|tengo que|tenemos que|hay que|debo|debemos|pendiente|tarea|no olvidar|no olvides|no me olvide|agendar|agenda|anota que|apunta que)\b/;
+const RE_PAGO_VERBO = /\b(pague|he pagado|ya pague|pagado|cancele|pago de|pagar|abone)\b/;
+
+// Devuelve el pago fijo mencionado. Con verbo de pago basta una palabra del nombre;
+// sin él, deben aparecer todas (así "gasté 85 en luz" no se confunde con "Luz del Sur").
+function buscarPagoFijo(n) {
+  const conVerbo = RE_PAGO_VERBO.test(n);
+  let mejor = null, puntos = 0;
+  for (const p of db.pagos) {
+    const palabras = norm(p.nombre).split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !/^(del|las|los|por|para|con)$/.test(w));
+    const pts = palabras.filter(w => new RegExp(`\\b${w}\\b`).test(n)).length;
+    if (!pts || (!conVerbo && pts < palabras.length)) continue;
+    if (pts > puntos) { puntos = pts; mejor = p; }
+  }
+  return mejor;
+}
+
+function interpretar(texto, forzar) {
+  const t = crearTexto(texto);
+  const n0 = t.n;
+  let tipo = forzar;
+  const pago = buscarPagoFijo(n0);
+  if (!tipo) {
+    if (RE_TAREA.test(n0)) tipo = 'tarea';
+    else if (pago && (RE_PAGO_VERBO.test(n0) || extraerMonto(crearTexto(texto)))) tipo = 'pagar';
+    else if (extraerMonto(crearTexto(texto))) tipo = 'gasto';
+    else if (/\b(gaste|compre|me costo|pague)\b/.test(n0)) tipo = 'gasto';
+    else tipo = 'tarea';
+  }
+  if (tipo === 'pagar' && !pago) tipo = 'gasto';
+
+  if (tipo === 'gasto' || tipo === 'pagar') {
+    const monto = extraerMonto(t);
+    const fecha = extraerFecha(t, true);
+    while (t.quitar(/\b(?:hoy |ya )?(?:he gastado|gaste|gasto de|gasto|he pagado|pague|pago de|pago|compre|me costo|costo|me salio|salio|cancele|abone|registra(?:r)?|anota(?:r)?|apunta(?:r)?|un gasto(?: de)?)\b/)) { /* quitar todas */ }
+    const datos = {
+      monto: monto ? monto.val : '',
+      moneda: monto && monto.moneda === 'USD' ? 'USD' : 'PEN',
+      fecha
+    };
+    if (tipo === 'pagar') return { tipo, pago, datos };
+    datos.categoria = buscarClave(n0, CLAVES_CATEGORIA, db.ajustes.categorias) || (db.ajustes.categorias.includes('Otros') ? 'Otros' : db.ajustes.categorias[0]);
+    datos.nota = limpiarFrase(t.o).slice(0, 80);
+    return { tipo: 'gasto', datos };
+  }
+
+  // Pendiente
+  let repetir = 'no';
+  if (t.quitar(/\b(?:todos los dias|cada dia|diariamente|a diario)\b/)) repetir = 'diaria';
+  else if (t.quitar(/\b(?:cada mes|todos los meses|mensualmente)\b/)) repetir = 'mensual';
+  else if (t.quitar(/\b(?:cada semana|todas las semanas|semanalmente)\b/)) repetir = 'semanal';
+  let fecha = '';
+  const diaFijo = t.quitar(new RegExp(`\\b(?:todos los|cada) (${DIAS_N.join('|')})s?\\b`));
+  if (diaFijo) { repetir = 'semanal'; fecha = proximoDia(diaFijo[1], false); }
+  if (!fecha) fecha = extraerFecha(t, false);
+  if (repetir !== 'no' && !fecha) fecha = hoyStr();
+  let prioridad = 'media';
+  if (t.quitar(/\b(?:es |muy )*(?:urgente(?:mente)?|importante|prioridad alta|lo antes posible|cuanto antes|sin falta)\b/)) prioridad = 'alta';
+  else if (t.quitar(/\b(?:sin apuro|cuando pueda|cuando se pueda|no es urgente|prioridad baja)\b/)) prioridad = 'baja';
+  let prev;
+  do {
+    prev = t.n;
+    t.quitar(/^\s*(?:oye|por favor|porfa|ok|bueno|claude|secretaria)?[\s,]*(?:recuerdame|recordarme|recuerda(?:me)?|acuerdame|no (?:me )?olvides(?: de)?|no olvidar|no me olvide(?: de)?|anota(?:r)?(?: que)?|apunta(?:r)?(?: que)?|agrega(?:r)?(?: una tarea| un pendiente)?|agendar|agenda|nueva tarea|nuevo pendiente|pendiente|tarea|tengo que|tenemos que|hay que|debo|debemos|que|de|para)\b[\s,:]*/);
+  } while (t.n !== prev);
+  const area = buscarClave(n0, CLAVES_AREA) || 'Personal';
+  return { tipo: 'tarea', datos: { titulo: limpiarFrase(t.o).slice(0, 120), fecha, prioridad, repetir, area } };
+}
+
+function ecoVoz(texto, tipo) {
+  const otros = [['gasto', 'Gasto'], ['tarea', 'Pendiente']].filter(([v]) => v !== tipo && !(tipo === 'pagar' && v === 'gasto'));
+  return `<div class="voz-eco">
+    <span>🎤 “${esc(texto)}”</span>
+    <span class="small">¿Era otra cosa? ${otros.map(([v, l]) => `<button type="button" class="link" data-action="voz-como" data-tipo="${v}">${l}</button>`).join(' · ')}</span>
+  </div>`;
+}
+
+function procesarVoz(texto, forzar) {
+  texto = (texto || '').trim();
+  if (!texto) { toast('No escuché nada. Intenta de nuevo.'); return; }
+  detenerVoz();
+  estado.vozTexto = texto;
+  const r = interpretar(texto, forzar);
+  if (r.tipo === 'pagar') {
+    const ym = mesStr(new Date());
+    const e = estadoPago(r.pago, ym);
+    abrirSheet(ecoVoz(texto, 'pagar') + formPagar(r.pago, e.pagado ? sumarMes(ym, 1) : ym, r.datos));
+  } else if (r.tipo === 'gasto') {
+    abrirSheet(ecoVoz(texto, 'gasto') + formGasto(null, r.datos));
+  } else {
+    abrirSheet(ecoVoz(texto, 'tarea') + formTarea(null, r.datos));
+  }
+  const btn = $('#sheetBody button.primary[type=submit]');
+  if (btn && (r.tipo === 'tarea' ? r.datos.titulo : r.datos.monto)) setTimeout(() => btn.focus(), 80);
+}
+
+const Reconocimiento = window.SpeechRecognition || window.webkitSpeechRecognition;
+let reconocedor = null;
+function detenerVoz() {
+  if (reconocedor) { const r = reconocedor; reconocedor = null; try { r.abort(); } catch (e) { /* nada */ } }
+}
+function formVoz() {
+  return `<h2>Dime qué anotar</h2>
+  <form id="fVoz" class="form" autocomplete="off">
+    <button type="button" class="voz-mic" id="vozMic" data-action="voz-reintentar" aria-label="Hablar">
+      <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg>
+    </button>
+    <p class="muted centro" id="vozEstado">${Reconocimiento ? 'Te escucho…' : 'Este navegador no permite dictar. Escribe la frase o usa el micrófono del teclado.'}</p>
+    <textarea name="texto" id="vozTexto" rows="2" placeholder="O escríbelo aquí…"></textarea>
+    <p class="small muted">Ejemplos: “Gasté 85 soles en luz” · “Ayer compré medicinas por 40 soles” · “Pagué la Visa 450” · “Recuérdame arreglar la ducha el sábado” · “Tengo que enviar el informe mañana, es urgente”</p>
+    <div class="acciones">
+      <span class="spacer"></span>
+      <button type="submit" class="btn primary">Continuar</button>
+    </div>
+  </form>`;
+}
+function escuchar() {
+  detenerVoz();
+  if (!$('#fVoz')) abrirSheet(formVoz());
+  if (!Reconocimiento) return;
+  const mic = $('#vozMic'), est = $('#vozEstado'), area = $('#vozTexto');
+  const r = new Reconocimiento();
+  reconocedor = r;
+  r.lang = 'es-PE';
+  r.interimResults = true;
+  r.continuous = false;
+  r.maxAlternatives = 1;
+  let final = '';
+  mic.classList.add('escuchando');
+  est.textContent = 'Te escucho…';
+  area.value = '';
+  r.onresult = e => {
+    let txt = '';
+    final = '';
+    for (const res of e.results) { txt += res[0].transcript; if (res.isFinal) final += res[0].transcript; }
+    area.value = txt;
+  };
+  r.onerror = e => {
+    if (reconocedor !== r) return;
+    const msj = {
+      'not-allowed': 'Permite el uso del micrófono para esta app (ícono del candado o ajustes del sitio).',
+      'service-not-allowed': 'Permite el uso del micrófono para esta app.',
+      'no-speech': 'No te escuché. Toca el micrófono para intentar de nuevo.',
+      'audio-capture': 'No se encontró un micrófono.',
+      'network': 'El dictado necesita internet. Puedes escribir la frase.',
+      'language-not-supported': 'Idioma no disponible; prueba de nuevo.'
+    }[e.error] || 'No se pudo escuchar. Toca el micrófono para intentar de nuevo.';
+    if (e.error === 'language-not-supported') r.lang = 'es-ES';
+    est.textContent = msj;
+  };
+  r.onend = () => {
+    if (reconocedor !== r) return;
+    reconocedor = null;
+    mic.classList.remove('escuchando');
+    const texto = (final || area.value).trim();
+    if (texto) { est.textContent = 'Entendido ✓'; setTimeout(() => { if ($('#fVoz')) procesarVoz(texto); }, 450); }
+    else if (est.textContent === 'Te escucho…') est.textContent = 'No te escuché. Toca el micrófono para intentar de nuevo.';
+  };
+  try { r.start(); } catch (e) { mic.classList.remove('escuchando'); est.textContent = 'Toca el micrófono para hablar.'; reconocedor = null; }
 }
 
 /* ---------- descargas ---------- */
@@ -887,6 +1196,7 @@ function abrirSheet(html) {
   if (foco) setTimeout(() => foco.focus(), 50);
 }
 function cerrarSheet(desdeHistorial) {
+  detenerVoz();
   if (sheet.hidden) return;
   sheet.hidden = true;
   $('#sheetBody').innerHTML = '';
@@ -975,6 +1285,8 @@ document.addEventListener('click', e => {
       el.closest('form').fecha.value = f; break;
     }
     case 'exportar': exportar(); break;
+    case 'voz': case 'voz-reintentar': escuchar(); break;
+    case 'voz-como': procesarVoz(estado.vozTexto, el.dataset.tipo); break;
     case 'excel': descargarExcel(el.dataset.periodo); break;
     case 'omitir-reporte': db.ajustes.reporteAvisado = el.dataset.periodo; guardar(); render(); break;
     case 'importar': $('#archivoImportar').click(); break;
@@ -995,6 +1307,7 @@ document.addEventListener('submit', e => {
     case 'fTarea': guardarTarea(f, fd); break;
     case 'fPago': guardarPagoFijo(f, fd); break;
     case 'fPagar': registrarPago(f, fd); break;
+    case 'fVoz': procesarVoz(fd.texto); break;
     case 'fRapida': {
       const titulo = (fd.titulo || '').trim();
       if (!titulo) return;
@@ -1030,6 +1343,14 @@ document.addEventListener('keydown', e => {
 
 /* ---------- inicio ---------- */
 render();
+(() => {
+  const accion = new URLSearchParams(location.search).get('accion');
+  if (!accion) return;
+  history.replaceState(null, '', location.pathname);
+  if (accion === 'voz') escuchar();
+  else if (accion === 'gasto') abrirSheet(formGasto());
+  else if (accion === 'tarea') abrirSheet(formTarea());
+})();
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
   navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -1,7 +1,7 @@
 // Service worker: permite abrir la app sin internet.
 // Estrategia "red primero": si hay internet carga siempre la versión más nueva;
 // si no hay, usa la copia guardada.
-const CACHE = 'misecretaria-v2';
+const CACHE = 'misecretaria-v3';
 const ARCHIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'lib/exceljs.min.js'];
 

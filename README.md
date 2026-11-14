@@ -7,6 +7,7 @@ App personal para registrar gastos familiares, pagos fijos (tarjetas y servicios
 - **Gastos** en soles (S/) o dólares (US$), con conversión automática, categorías y resumen del mes.
 - **Pagos fijos**: tarjetas, luz, agua, internet… avisa cuántos días faltan y al pagar se registra como gasto.
 - **Pendientes** por área (Hogar, Trabajo, Personal, Familia), con fecha, prioridad y repetición.
+- **Anotar por voz**: botón de micrófono; entiende frases como “Gasté 85 soles en luz”, “Pagué la Visa 450” o “Recuérdame arreglar la ducha el sábado”. En Android, mantén presionado el ícono de la app → *Dictar*.
 - **Reportes en Excel**: del mes o del año, desde la pestaña Gastos. Al empezar cada mes la app ofrece el reporte del mes anterior.
 - **Copia de seguridad**: descargar/restaurar un archivo `.json`.
 
