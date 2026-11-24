@@ -154,9 +154,16 @@ button.fila.fila-main { flex-direction: row; justify-content: space-between; wid
 .fila-acciones { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
 .fila-acciones .link { font-size: .78rem; padding: 2px 0; }
 .solo-tarjeta { display: none !important; }
-form:has(input[name=tipo][value=Tarjeta]:checked):has(input[name=frecuencia][value=mensual]:checked) .solo-tarjeta { display: flex !important; }
-form:has(input[name=tipo][value=Tarjeta]:checked):has(input[name=frecuencia][value=mensual]:checked) p.solo-tarjeta { display: block !important; }
-form:has(input[name=frecuencia][value=unico]:checked) .solo-mensual { display: none; }
+form:has(input[name=tipo][value=Tarjeta]:checked) .solo-tarjeta { display: flex !important; }
+form:has(input[name=tipo][value=Tarjeta]:checked) p.solo-tarjeta { display: block !important; }
+.lista-cuentas { display: flex; flex-direction: column; gap: 10px; }
+.cuenta { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); }
+.card .cuenta { border: 0; box-shadow: none; padding: 10px 0; border-radius: 0; border-bottom: 1px solid var(--border); }
+.card .cuenta:last-child { border-bottom: 0; }
+.cuenta-fila { display: flex; gap: 10px; align-items: flex-start; }
+.cuenta-acciones { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+.monto.grande { font-size: 1.25rem; }
+.monto.muted { color: var(--muted); }
 .tarea.hecha .fila-titulo { text-decoration: line-through; color: var(--muted); }
 .check {
   width: 28px; height: 28px; flex-shrink: 0; border-radius: 50%;
