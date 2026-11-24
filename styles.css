@@ -156,6 +156,14 @@ button.fila.fila-main { flex-direction: row; justify-content: space-between; wid
 .solo-tarjeta { display: none !important; }
 form:has(input[name=tipo][value=Tarjeta]:checked) .solo-tarjeta { display: flex !important; }
 form:has(input[name=tipo][value=Tarjeta]:checked) p.solo-tarjeta { display: block !important; }
+.solo-tarjeta-txt { display: none; }
+form:has(input[name=tipo][value=Tarjeta]:checked) .solo-tarjeta-txt { display: inline; }
+form:has(input[name=tipo][value=Tarjeta]:checked) .no-tarjeta-txt { display: none; }
+div.solo-tarjeta { flex-direction: column; }
+.minimo { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.minimo .barra-txt { font-size: .82rem; margin: 0; }
+.minimo.alerta .barra-relleno { background: var(--warn); }
+.minimo.alerta .barra-txt strong { color: var(--warn); }
 .lista-cuentas { display: flex; flex-direction: column; gap: 10px; }
 .cuenta { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); }
 .card .cuenta { border: 0; box-shadow: none; padding: 10px 0; border-radius: 0; border-bottom: 1px solid var(--border); }

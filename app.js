@@ -5,11 +5,12 @@
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.1.0';
 
 const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
 const TIPOS_PAGO = ['Tarjeta', 'Servicio', 'Préstamo', 'Suscripción', 'Otro'];
+const MARCAS = ['Visa', 'Mastercard', 'American Express', 'Diners', 'Otra'];
 const CATEGORIA_POR_TIPO = { 'Tarjeta': 'Tarjetas', 'Servicio': 'Servicios', 'Préstamo': 'Otros', 'Suscripción': 'Ocio', 'Otro': 'Otros' };
 const PRIORIDADES = [['alta', 'Alta'], ['media', 'Media'], ['baja', 'Baja']];
 const ORDEN_PRIO = { alta: 0, media: 1, baja: 2 };
@@ -186,11 +187,23 @@ function cuenta(p) {
   if (p.tipo === 'Tarjeta' && p.corte) {
     ultimoCorte = diaDelMes(hoy.slice(0, 7), p.corte);
     if (ultimoCorte >= hoy) ultimoCorte = diaDelMes(sumarMes(hoy.slice(0, 7), -1), p.corte);
-    facturado = r2(suma(pendientes.filter(c => c.fecha <= ultimoCorte).map(c => c.falta)));
+    // lo sumado a mano (estado de cuenta) ya está facturado; las compras, solo si son de antes del corte
+    facturado = r2(suma(pendientes.filter(c => c.tipo !== 'compra' || c.fecha <= ultimoCorte).map(c => c.falta)));
     enCiclo = r2(saldo - facturado);
   }
+  let minimo = null;
+  if (p.tipo === 'Tarjeta' && p.consumoMin > 0) {
+    let desde, hasta;
+    if (p.corte) {
+      let uc = diaDelMes(hoy.slice(0, 7), p.corte);
+      if (uc >= hoy) uc = diaDelMes(sumarMes(hoy.slice(0, 7), -1), p.corte);
+      desde = sumarDias(uc, 1); hasta = diaDelMes(sumarMes(uc.slice(0, 7), 1), p.corte);
+    } else { desde = hoy.slice(0, 7) + '-01'; hasta = diaDelMes(hoy.slice(0, 7), 31); }
+    const usado = r2(suma(db.gastos.filter(g => g.tarjetaId === p.id && g.fecha >= desde && g.fecha <= hasta).map(enSoles)));
+    minimo = { desde, hasta, usado, meta: p.consumoMin, falta: r2(Math.max(0, p.consumoMin - usado)), dias: diasEntre(hoy, hasta) };
+  }
   return {
-    p, cargos, pendientes, saldo, aFavor: r2(disponible), vence, proximo,
+    p, cargos, pendientes, saldo, aFavor: r2(disponible), vence, proximo, minimo,
     dias: diasEntre(hoy, proximo), vencido: r2(suma(pendientes.filter(c => c.vence < hoy).map(c => c.falta))),
     deCompras: r2(suma(pendientes.filter(c => c.tipo === 'compra').map(c => c.falta))),
     ultimoCorte, facturado, enCiclo
@@ -206,6 +219,45 @@ function abonosEn(prefijo) {
   db.pagos.forEach(p => (p.abonos || []).forEach(a => { if (a.fecha.startsWith(prefijo)) lista.push({ ...a, p, soles: aSoles(a.monto, a.moneda, a.tc) }); }));
   return lista.sort((a, b) => a.fecha.localeCompare(b.fecha));
 }
+// Clave para detectar cuentas repetidas ("TARJETA iO" = "io", "VISA LIGHT" = "Visa light")
+const PALABRAS_MARCA = /\b(visa|mastercard|master|american|express|amex|diners|club|tarjeta|de|credito|la|el)\b/g;
+const claveCuenta = p => norm(p.nombre).replace(PALABRAS_MARCA, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+function marcaDe(p) {
+  if (p.marca) return p.marca;
+  const n = norm(p.nombre);
+  if (/\bvisa\b/.test(n)) return 'Visa';
+  if (/\bmaster ?card\b|\bmaster\b/.test(n)) return 'Mastercard';
+  if (/\bamex\b|american express/.test(n)) return 'American Express';
+  if (/\bdiners\b/.test(n)) return 'Diners';
+  return '';
+}
+function marcasCompatibles(a, b) { const x = marcaDe(a), y = marcaDe(b); return !x || !y || x === y; }
+function cuentasRepetidas() {
+  const grupos = [], usados = new Set();
+  const activas = db.pagos.filter(p => p.activo !== false);
+  for (const a of activas) {
+    if (usados.has(a.id) || !claveCuenta(a)) continue;
+    const g = activas.filter(b => b.tipo === a.tipo && claveCuenta(b) === claveCuenta(a) && marcasCompatibles(a, b));
+    if (g.length > 1) { g.forEach(x => usados.add(x.id)); grupos.push(g); }
+  }
+  return grupos;
+}
+// Pasa todo (montos, pagos, compras) de las cuentas origen a la cuenta destino y las elimina
+function unirCuentas(destinoId, origenIds) {
+  const dest = db.pagos.find(p => p.id === destinoId);
+  for (const oid of origenIds) {
+    if (oid === destinoId) continue;
+    const o = db.pagos.find(p => p.id === oid);
+    if (!o) continue;
+    dest.cargos = [...(dest.cargos || []), ...(o.cargos || [])];
+    dest.abonos = [...(dest.abonos || []), ...(o.abonos || [])];
+    for (const k of ['corte', 'monto', 'consumoMin', 'marca', 'nota']) if (!dest[k] && o[k]) dest[k] = o[k];
+    db.gastos.forEach(g => { if (g.tarjetaId === oid) g.tarjetaId = destinoId; if (g.pagoId === oid) g.pagoId = destinoId; });
+    db.pagos = db.pagos.filter(p => p.id !== oid);
+  }
+  dest.actualizado = new Date().toISOString();
+}
+
 const tarjetasActivas = () => db.pagos.filter(p => p.tipo === 'Tarjeta' && p.activo !== false);
 function medioTexto(g) {
   if (g.tarjetaId) { const t = db.pagos.find(p => p.id === g.tarjetaId); return t ? t.nombre : 'Tarjeta'; }
@@ -299,6 +351,13 @@ function filaCuenta(c, compacta) {
   if (c.aFavor > 0) extra.push(`A favor: ${soles(c.aFavor)}`);
   if (c.saldo <= 0 && p.monto && !p.auto) extra.push(`Monto habitual ${fmt(p.monto, p.moneda)}`);
   if (p.auto && p.monto) extra.push(`Se suma ${fmt(p.monto, p.moneda)} cada mes`);
+  const m = c.minimo;
+  const minimoHtml = m && !compacta ? `<div class="minimo ${m.falta > 0 && m.dias <= 5 ? 'alerta' : ''}">
+      <div class="barra-txt"><span>Consumo mínimo ${fechaCorta(m.desde)} – ${fechaCorta(m.hasta)}</span>
+        <span>${m.falta > 0 ? `faltan <strong>${soles(m.falta)}</strong>` : '✓ cumplido'}</span></div>
+      <div class="barra-pista"><div class="barra-relleno" style="width:${Math.min(100, m.usado / m.meta * 100)}%"></div></div>
+      <div class="fila-sub">${soles(m.usado)} de ${soles(m.meta)}${m.falta > 0 ? ` · quedan ${m.dias} ${m.dias === 1 ? 'día' : 'días'}` : ''}</div>
+    </div>` : '';
   return `<div class="cuenta">
     <div class="cuenta-fila">
       <button class="fila-main" data-action="editar-pago" data-id="${p.id}">
@@ -311,6 +370,7 @@ function filaCuenta(c, compacta) {
         ${badgeCuenta(c)}
       </div>
     </div>
+    ${minimoHtml}
     <div class="cuenta-acciones">
       ${compacta ? '' : `<button class="btn-sm ghost" data-action="historial" data-id="${p.id}">Historial</button>
       <span class="spacer"></span>
@@ -369,7 +429,9 @@ function vistaInicio() {
   const urgentesPago = proximos.filter(e => e.dias <= 3).length;
   if (urgentesPago) frases.push(`${urgentesPago} ${urgentesPago === 1 ? 'pago por vencer' : 'pagos por vencer'} en los próximos 3 días`);
   if (paraHoy.length) frases.push(`${paraHoy.length} ${paraHoy.length === 1 ? 'pendiente' : 'pendientes'} para hoy o atrasados`);
-  const frase = frases.length ? 'Tienes ' + frases.join(' y ') + '.' : 'Todo en orden por ahora.';
+  let frase = frases.length ? 'Tienes ' + frases.join(' y ') + '.' : 'Todo en orden por ahora.';
+  const faltaMin = tarjetasActivas().map(cuenta).filter(c => c.minimo && c.minimo.falta > 0 && c.minimo.dias <= 5);
+  if (faltaMin.length) frase += ' ' + faltaMin.map(c => `A ${esc(c.p.nombre)} le faltan ${soles(c.minimo.falta)} de consumo mínimo (cierra el ${fechaCorta(c.minimo.hasta)}).`).join(' ');
 
   let html = `<section class="saludo">
     <p class="muted">${fechaLarga(hoy)}</p>
@@ -485,7 +547,12 @@ function vistaPagos() {
   const vencido = suma(cuentas.map(c => c.vencido));
   const ym = mesStr(new Date());
   const pagadoMes = suma(abonosEn(ym).map(a => a.soles));
-  return `<section class="card resumen dos">
+  const repetidas = cuentasRepetidas();
+  const avisoRep = repetidas.map(g => `<section class="aviso">
+    <p><strong>¿Cuentas repetidas?</strong> ${g.map(x => '“' + esc(x.nombre) + '”').join(' y ')} parecen la misma ${g[0].tipo === 'Tarjeta' ? 'tarjeta' : 'cuenta'}.</p>
+    <button class="btn-sm primary" data-action="unir-elegir" data-ids="${g.map(x => x.id).join(',')}">Unir</button>
+  </section>`).join('');
+  return `${avisoRep}<section class="card resumen dos">
     <div><p class="muted">Por pagar</p><p class="cifra sm">${soles(total)}</p>
       ${vencido > 0 ? `<p class="small txt-danger">Vencido: ${soles(vencido)}</p>` : `<p class="muted small">Nada vencido</p>`}</div>
     <div><p class="muted">Pagado en ${MESES[Number(ym.slice(5)) - 1]}</p><p class="cifra sm txt-ok">${soles(pagadoMes)}</p>
@@ -664,14 +731,24 @@ function formPago(p) {
   p = p || { nombre: '', tipo: 'Servicio', dia: '', monto: '', moneda: 'PEN', categoria: '', nota: '', activo: true };
   return `<h2>${nuevo ? 'Nueva cuenta por pagar' : 'Editar cuenta'}</h2>
   <form id="fPago" class="form" data-id="${nuevo ? '' : p.id}" autocomplete="off">
-    <label class="lbl">Nombre<input name="nombre" value="${esc(p.nombre)}" required placeholder="Ej. Luz del Sur, Internet, Tarjeta iO" data-autofocus></label>
     <span class="lbl">Tipo</span>
     ${chipsRadio('tipo', TIPOS_PAGO.map(t => [t, t]), p.tipo)}
+    <span class="lbl solo-tarjeta">Marca de la tarjeta</span>
+    <div class="solo-tarjeta">${chipsRadio('marca', MARCAS.map(m => [m, m]), marcaDe(p) || 'Visa')}</div>
+    <label class="lbl"><span class="solo-tarjeta-txt">Nombre de la tarjeta</span><span class="no-tarjeta-txt">Nombre</span>
+      <input name="nombre" value="${esc(p.nombreCorto || (p.tipo === 'Tarjeta' ? quitarMarca(p.nombre, marcaDe(p)) : p.nombre))}" required
+        placeholder="Ej. Luz del Sur, Internet — en tarjetas: Light, iO, Signature" data-autofocus>
+    </label>
+    <p class="muted small solo-tarjeta">Se mostrará como “Marca + nombre”, por ejemplo <strong>Visa Light</strong>. Escríbelo una sola vez: no se permiten nombres repetidos.</p>
     <label class="lbl">Día de pago de cada mes<input name="dia" type="number" min="1" max="31" inputmode="numeric" value="${p.dia || ''}" required placeholder="Ej. 5"></label>
     <label class="lbl solo-tarjeta">Día de cierre o fecha de corte (opcional)
       <input name="corte" type="number" min="1" max="31" inputmode="numeric" value="${p.corte || ''}" placeholder="Ej. 28 — lo ves en tu estado de cuenta">
     </label>
     <p class="muted small solo-tarjeta">Con el día de corte separo lo ya facturado de las compras del ciclo actual.</p>
+    <label class="lbl solo-tarjeta">Consumo mínimo por ciclo (opcional)
+      <input name="consumoMin" inputmode="decimal" value="${p.consumoMin || ''}" placeholder="Ej. 300 — si tu tarjeta exige gastar un mínimo">
+    </label>
+    <p class="muted small solo-tarjeta">Te muestro cuánto llevas comprado con la tarjeta y cuánto falta para llegar al mínimo.</p>
     <span class="lbl">Monto habitual (opcional)</span>
     <div class="monto-box chico">
       ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], p.moneda || 'PEN')}
@@ -689,11 +766,32 @@ function formPago(p) {
     <p class="muted small">No guardes números completos de tarjeta ni claves aquí.</p>
     ${nuevo ? '' : `<label class="check-lbl"><input type="checkbox" name="activo" ${p.activo !== false ? 'checked' : ''}> Activa (desmarca para pausarla)</label>`}
     <div class="acciones">
-      ${nuevo ? '' : `<button type="button" class="btn danger-ghost" data-action="eliminar-pago" data-id="${p.id}">Eliminar</button>`}
+      ${nuevo ? '' : `<button type="button" class="btn danger-ghost" data-action="eliminar-pago" data-id="${p.id}">Eliminar</button>
+      <button type="button" class="btn ghost" data-action="unir-manual" data-id="${p.id}">Unir con otra</button>`}
       <span class="spacer"></span>
       <button type="submit" class="btn primary">Guardar</button>
     </div>
   </form>`;
+}
+function quitarMarca(nombre, marca) {
+  let n = (nombre || '').trim().replace(/^tarjeta\s+/i, '');
+  if (marca && marca !== 'Otra') {
+    const alias = { 'Mastercard': 'master ?card|master', 'American Express': 'american express|amex', 'Diners': 'diners(?: club)?', 'Visa': 'visa' }[marca];
+    n = n.replace(new RegExp(`^(?:${alias})\\s+`, 'i'), '').replace(/^tarjeta\s+/i, '');
+  }
+  return n.trim() || nombre;
+}
+
+// origen: si se indica, solo esa cuenta pasa a la elegida (unión manual); si no, todas las ids se juntan
+function formUnir(ids, titulo, texto, origen) {
+  const origenes = origen ? origen : ids.join(',');
+  const cs = ids.filter(id => id !== origen).map(id => db.pagos.find(p => p.id === id)).filter(Boolean).map(cuenta);
+  return `<h2>${titulo}</h2>
+  <p class="muted small">${texto}</p>
+  <div class="menu-grande">${cs.map(c => `<button data-action="unir-a" data-destino="${c.p.id}" data-origenes="${origenes}">
+    <strong>${origen ? 'Pasar todo a' : 'Quedarme con'} “${esc(c.p.nombre)}”</strong>
+    <span>${(c.p.cargos || []).length + (c.p.abonos || []).length} movimientos · saldo ${soles(Math.max(c.saldo, 0))}${c.p.corte ? ' · corte día ' + c.p.corte : ''}</span>
+  </button>`).join('')}</div>`;
 }
 
 function formCargo(p, pre = {}) {
@@ -826,9 +924,27 @@ function guardarPagoFijo(f, fd) {
   if (corte !== null && !(corte >= 1 && corte <= 31)) { toast('El día de corte debe estar entre 1 y 31'); return; }
   const inicial = fd.inicial ? parseMonto(fd.inicial) : 0;
   if (Number.isNaN(inicial)) { toast('El monto pendiente no es válido'); return; }
+  const consumoMin = fd.consumoMin ? parseMonto(fd.consumoMin) : 0;
+  if (Number.isNaN(consumoMin)) { toast('El consumo mínimo no es válido'); return; }
+  const tipo = fd.tipo || 'Otro';
+  let nombre = (fd.nombre || '').trim().replace(/\s+/g, ' ');
+  let nombreCorto, marca;
+  if (tipo === 'Tarjeta') {
+    marca = fd.marca || 'Otra';
+    nombreCorto = quitarMarca(nombre, marca);
+    nombre = marca === 'Otra' ? nombreCorto : `${marca} ${nombreCorto}`;
+  }
+  const id0 = f.dataset.id;
+  const choca = db.pagos.find(x => x.id !== id0 && x.activo !== false && x.tipo === tipo &&
+    claveCuenta(x) === claveCuenta({ nombre }) && marcasCompatibles(x, { nombre, marca }));
+  if (choca) {
+    toast(id0 ? `“${choca.nombre}” tiene el mismo nombre. Únelas con “Unir con otra” o cambia el nombre.`
+      : `Ya existe “${choca.nombre}”. Usa esa o elige otro nombre.`);
+    return;
+  }
   const ahora = new Date().toISOString();
   const datos = {
-    nombre: fd.nombre.trim(), tipo: fd.tipo || 'Otro', dia, monto: monto || 0, moneda: fd.moneda || 'PEN',
+    nombre, tipo, dia, monto: monto || 0, moneda: fd.moneda || 'PEN',
     auto: fd.auto === 'on' && monto > 0, categoria: fd.categoria || '', nota: (fd.nota || '').trim(), actualizado: ahora
   };
   const id = f.dataset.id;
@@ -841,6 +957,8 @@ function guardarPagoFijo(f, fd) {
     db.pagos.push(p);
   }
   if (datos.tipo === 'Tarjeta' && corte) p.corte = corte; else delete p.corte;
+  if (datos.tipo === 'Tarjeta') { p.marca = marca; p.nombreCorto = nombreCorto; if (consumoMin > 0) p.consumoMin = consumoMin; else delete p.consumoMin; }
+  else { delete p.marca; delete p.nombreCorto; delete p.consumoMin; }
   if (p.auto && !p.autoDesde) p.autoDesde = proximoDiaPago(p, hoyStr()).slice(0, 7);  // el primer cargo no nace vencido
   if (!p.auto) delete p.autoDesde;
   if (inicial > 0) p.cargos.push({ id: uid(), fecha: hoyStr(), monto: inicial, moneda: datos.moneda, nota: 'Monto pendiente inicial' });
@@ -1534,6 +1652,24 @@ document.addEventListener('click', e => {
     case 'sumar-cargo': abrirSheet(formCargo(db.pagos.find(p => p.id === id))); break;
     case 'historial': abrirSheet(formHistorial(db.pagos.find(p => p.id === id))); break;
     case 'historial-pagos': abrirSheet(formPagosHechos()); break;
+    case 'unir-elegir': abrirSheet(formUnir(el.dataset.ids.split(','), 'Unir cuentas repetidas',
+      'Elige con cuál te quedas. Sus montos, pagos y compras se juntan en una sola; no se pierde nada.')); break;
+    case 'unir-manual': {
+      const p = db.pagos.find(x => x.id === id);
+      const otras = db.pagos.filter(x => x.id !== id && x.tipo === p.tipo);
+      if (!otras.length) { toast('No hay otra cuenta del mismo tipo para unir'); break; }
+      abrirSheet(formUnir([id, ...otras.map(x => x.id)], `Unir “${esc(p.nombre)}”`,
+        `Toca la cuenta con la que te quedas: todo lo de “${esc(p.nombre)}” pasará a ella y esta se eliminará.`, id));
+      break;
+    }
+    case 'unir-a': {
+      const destino = el.dataset.destino;
+      const origenes = el.dataset.origenes.split(',').filter(x => x !== destino);
+      const d = db.pagos.find(x => x.id === destino);
+      if (!confirm(`¿Unir en “${d.nombre}”? Las otras se eliminan después de pasar todo su historial.`)) return;
+      unirCuentas(destino, origenes);
+      guardar(); cerrarSheet(); toast(`Unidas en “${d.nombre}”. Revisa su marca y nombre.`); render(); break;
+    }
     case 'monto-rapido': { const inp = el.closest('form').monto; inp.value = el.dataset.v; actualizarEquiv(); break; }
     case 'quitar-mov': {
       const p = db.pagos.find(x => x.id === id);
