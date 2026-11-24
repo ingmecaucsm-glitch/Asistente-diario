@@ -5,13 +5,16 @@
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.2.0';
 
-const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
+const CATEGORIAS_BASE = ['Alimentos', 'Restaurante', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ropa', 'Pago automático', 'Otros'];
+const CATEGORIAS_V1 = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
+const RENOMBRAR_CATEGORIA = { 'Mercado y comida': 'Alimentos', 'Ocio': 'Otros' };
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
-const TIPOS_PAGO = ['Tarjeta', 'Servicio', 'Préstamo', 'Suscripción', 'Otro'];
+const TIPOS_PAGO = ['Tarjeta', 'Servicio', 'Suscripción', 'Préstamo', 'Otro'];
 const MARCAS = ['Visa', 'Mastercard', 'American Express', 'Diners', 'Otra'];
-const CATEGORIA_POR_TIPO = { 'Tarjeta': 'Tarjetas', 'Servicio': 'Servicios', 'Préstamo': 'Otros', 'Suscripción': 'Ocio', 'Otro': 'Otros' };
+const CATEGORIA_POR_TIPO = { 'Tarjeta': 'Tarjetas', 'Servicio': 'Servicios', 'Préstamo': 'Otros', 'Suscripción': 'Pago automático', 'Otro': 'Otros' };
+const esSus = p => p.tipo === 'Suscripción';
 const PRIORIDADES = [['alta', 'Alta'], ['media', 'Media'], ['baja', 'Baja']];
 const ORDEN_PRIO = { alta: 0, media: 1, baja: 2 };
 const REPETIR = [['no', 'No se repite'], ['diaria', 'Cada día'], ['semanal', 'Cada semana'], ['mensual', 'Cada mes']];
@@ -210,7 +213,7 @@ function cuenta(p) {
   };
 }
 function pagosProximos(diasMax) {
-  return db.pagos.filter(p => p.activo !== false).map(cuenta)
+  return db.pagos.filter(p => p.activo !== false && !esSus(p)).map(cuenta)
     .filter(c => c.saldo > 0 && c.dias <= diasMax).sort((a, b) => a.dias - b.dias);
 }
 // Todos los pagos hechos (incluye los de versiones anteriores)
@@ -261,6 +264,7 @@ function unirCuentas(destinoId, origenIds) {
 const tarjetasActivas = () => db.pagos.filter(p => p.tipo === 'Tarjeta' && p.activo !== false);
 function medioTexto(g) {
   if (g.tarjetaId) { const t = db.pagos.find(p => p.id === g.tarjetaId); return t ? t.nombre : 'Tarjeta'; }
+  if (g.medio === 'debito' && g.cuentaDebito) return g.cuentaDebito;
   return { efectivo: 'Efectivo', debito: 'Débito / Yape' }[g.medio] || '';
 }
 
@@ -291,6 +295,50 @@ function migrarPagos() {
   }
   return cambio;
 }
+// Cambia la lista de categorías a la nueva (una sola vez; repetible sin efectos)
+function migrarCategorias() {
+  const a = db.ajustes;
+  let cambio = false;
+  if (a.categorias.some(c => RENOMBRAR_CATEGORIA[c])) {   // la lista aún tiene las categorías antiguas
+    const extras = a.categorias.filter(c => !CATEGORIAS_V1.includes(c) && !CATEGORIAS_BASE.includes(c));
+    a.categorias = [...CATEGORIAS_BASE.slice(0, -1), ...extras, 'Otros'];
+    cambio = true;
+  }
+  for (const g of db.gastos) if (RENOMBRAR_CATEGORIA[g.categoria]) { g.categoria = RENOMBRAR_CATEGORIA[g.categoria]; cambio = true; }
+  for (const p of db.pagos) if (RENOMBRAR_CATEGORIA[p.categoria]) { p.categoria = RENOMBRAR_CATEGORIA[p.categoria]; cambio = true; }
+  return cambio;
+}
+
+/* Suscripciones automáticas (tipo 'Suscripción'): cada mes, en su día de cobro, se registra sola
+   como gasto mientras esté activa. Ids fijos 'sus-<cuenta>-<AAAA-MM>' para no duplicar entre dispositivos.
+   p.cobroCon: 't:<idTarjeta>' (se suma a esa tarjeta) o '' (débito/ahorros, p.cuentaDebito)
+   p.desdeCobro: primer mes que se registra · p.saltados[ym]: meses que el usuario borró */
+function generarCobrosAutomaticos() {
+  let cambio = false;
+  const hoy = hoyStr();
+  for (const p of db.pagos) {
+    if (!esSus(p) || p.activo === false || !p.monto || !p.desdeCobro) continue;
+    for (let ym = p.desdeCobro; diaDelMes(ym, p.dia) <= hoy; ym = sumarMes(ym, 1)) {
+      const id = `sus-${p.id}-${ym}`;
+      if ((p.saltados && p.saltados[ym]) || db.gastos.some(g => g.id === id)) continue;
+      const fecha = diaDelMes(ym, p.dia);
+      const tarjetaId = p.cobroCon && p.cobroCon.startsWith('t:') ? p.cobroCon.slice(2) : undefined;
+      db.gastos.push(limpiarIndef({
+        id, fecha, monto: p.monto, moneda: p.moneda || 'PEN', tc: p.moneda === 'USD' ? db.ajustes.tc : undefined,
+        categoria: p.categoria || 'Pago automático', nota: p.nombre, suscripcionId: p.id,
+        medio: tarjetaId ? 'tarjeta' : 'debito', tarjetaId, cuentaDebito: tarjetaId ? undefined : (p.cuentaDebito || undefined),
+        creado: fecha + 'T12:00:00.000Z', actualizado: fecha + 'T12:00:00.000Z'
+      }));
+      cambio = true;
+    }
+  }
+  return cambio;
+}
+function textoCobro(p) {
+  if (p.cobroCon && p.cobroCon.startsWith('t:')) { const t = db.pagos.find(x => x.id === p.cobroCon.slice(2)); return t ? t.nombre : 'tarjeta'; }
+  return p.cuentaDebito || 'cuenta de ahorros / débito';
+}
+
 function limpiarIndef(o) { Object.keys(o).forEach(k => { if (o[k] === undefined) delete o[k]; }); return o; }
 
 function tareasOrdenadas(lista) {
@@ -380,6 +428,27 @@ function filaCuenta(c, compacta) {
     </div>
   </div>`;
 }
+function filaSuscripcion(p) {
+  const prox = proximoDiaPago(p, hoyStr());
+  const dias = diasEntre(hoyStr(), prox);
+  return `<div class="cuenta">
+    <div class="cuenta-fila">
+      <button class="fila-main" data-action="editar-pago" data-id="${p.id}">
+        <span class="fila-titulo">${esc(p.nombre)}</span>
+        <span class="fila-sub">Se cobra el ${p.dia} de cada mes · de ${esc(textoCobro(p))}</span>
+      </button>
+      <div class="fila-der">
+        <span class="monto">${p.monto ? fmt(p.monto, p.moneda) : '—'}</span>
+        <span class="badge">${dias === 0 ? 'Se cobra hoy' : 'Próximo: ' + fechaCorta(prox)}</span>
+      </div>
+    </div>
+    <div class="cuenta-acciones">
+      <button class="btn-sm ghost" data-action="sus-historial" data-id="${p.id}">Historial</button>
+      <span class="spacer"></span>
+      <button class="btn-sm ghost danger-txt" data-action="cancelar-sus" data-id="${p.id}">Cancelar suscripción</button>
+    </div>
+  </div>`;
+}
 function filaTarea(t) {
   const hoy = hoyStr();
   const atrasada = !t.hecha && t.fecha && t.fecha < hoy;
@@ -401,7 +470,7 @@ function filaGasto(g) {
   return `<button class="fila fila-main gasto" data-action="editar-gasto" data-id="${g.id}">
     <span class="fila-izq">
       <span class="fila-titulo">${esc(g.nota || g.categoria)}</span>
-      <span class="fila-sub">${esc(g.categoria)}${g.pagoId ? ' · pago fijo' : ''}${medioTexto(g) ? ' · ' + esc(medioTexto(g)) : ''}</span>
+      <span class="fila-sub">${esc(g.categoria)}${g.pagoId ? ' · pago de cuenta' : ''}${g.suscripcionId ? ' · automático' : ''}${medioTexto(g) ? ' · ' + esc(medioTexto(g)) : ''}</span>
     </span>
     <span class="fila-der">
       <span class="monto">${fmt(g.monto, g.moneda)}</span>
@@ -533,12 +602,14 @@ function renderListaGastos() {
 }
 
 function vistaPagos() {
-  const activos = db.pagos.filter(p => p.activo !== false);
+  const activos = db.pagos.filter(p => p.activo !== false && !esSus(p));
+  const subs = db.pagos.filter(p => p.activo !== false && esSus(p));
   const inactivos = db.pagos.filter(p => p.activo === false);
   if (!db.pagos.length) {
     return vacio(`<strong>Tus cuentas por pagar</strong><br>Crea una cuenta para la luz, el agua, internet, el celular o cada tarjeta.
       Cada una tiene un contador: le sumas lo que llega en el recibo (las compras con tarjeta se suman solas)
-      y, cuando pagas, vuelve a cero y el pago queda en el historial.`,
+      y, cuando pagas, vuelve a cero y el pago queda en el historial.<br>
+      Las suscripciones que se descuentan solas (YT Music, Netflix…) se crean con el tipo “Suscripción”.`,
       `<button class="btn primary" data-action="nuevo-pago">Crear cuenta</button>`);
   }
   const cuentas = activos.map(cuenta).sort((a, b) =>
@@ -559,8 +630,14 @@ function vistaPagos() {
       <button class="link small" data-action="historial-pagos">Ver pagos hechos</button></div>
   </section>
   <div class="lista-cuentas">${cuentas.map(c => filaCuenta(c)).join('')}</div>
-  ${inactivos.length ? `<details class="card"><summary>Pausadas (${inactivos.length})</summary>
-    ${inactivos.map(p => `<button class="fila fila-main" data-action="editar-pago" data-id="${p.id}"><span class="fila-titulo">${esc(p.nombre)}</span><span class="fila-sub">${esc(p.tipo)} · día ${p.dia}</span></button>`).join('')}
+  ${subs.length ? `<section class="card">
+    <div class="card-head"><h3>Suscripciones automáticas</h3><span class="muted small">${soles(suma(subs.map(x => aSoles(x.monto || 0, x.moneda))))} al mes</span></div>
+    <p class="muted small">Se registran solas como gasto cada mes. No hay que pagarlas.</p>
+    ${subs.sort((a, b) => proximoDiaPago(a, hoyStr()).localeCompare(proximoDiaPago(b, hoyStr()))).map(filaSuscripcion).join('')}
+  </section>` : ''}
+  ${inactivos.length ? `<details class="card"><summary>Pausadas o canceladas (${inactivos.length})</summary>
+    ${inactivos.map(p => `<div class="fila"><button class="fila-main" data-action="editar-pago" data-id="${p.id}"><span class="fila-titulo">${esc(p.nombre)}</span><span class="fila-sub">${esc(p.tipo)} · día ${p.dia}${p.canceladaEn ? ' · cancelada el ' + fechaCorta(p.canceladaEn) : ''}</span></button>
+      ${esSus(p) ? `<button class="btn-sm ghost" data-action="reactivar-sus" data-id="${p.id}">Reactivar</button>` : ''}</div>`).join('')}
   </details>` : ''}`;
 }
 
@@ -641,7 +718,7 @@ const VISTAS = {
 };
 
 function render() {
-  if (migrarPagos()) guardar();
+  if (migrarPagos() | migrarCategorias() | generarCobrosAutomaticos()) guardar();
   const [titulo, fn] = VISTAS[estado.tab];
   $('#titulo').textContent = titulo;
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('activo', b.dataset.tab === estado.tab));
@@ -740,7 +817,13 @@ function formPago(p) {
         placeholder="Ej. Luz del Sur, Internet — en tarjetas: Light, iO, Signature" data-autofocus>
     </label>
     <p class="muted small solo-tarjeta">Se mostrará como “Marca + nombre”, por ejemplo <strong>Visa Light</strong>. Escríbelo una sola vez: no se permiten nombres repetidos.</p>
-    <label class="lbl">Día de pago de cada mes<input name="dia" type="number" min="1" max="31" inputmode="numeric" value="${p.dia || ''}" required placeholder="Ej. 5"></label>
+    <label class="lbl"><span class="no-sus-txt">Día de pago de cada mes</span><span class="solo-sus-txt">Día de cobro de cada mes</span>
+      <input name="dia" type="number" min="1" max="31" inputmode="numeric" value="${p.dia || ''}" required placeholder="Ej. 5"></label>
+    <span class="lbl solo-sus">¿De dónde se descuenta?</span>
+    <div class="solo-sus">${chipsRadio('cobroCon', [['', 'Cuenta de ahorros / débito'], ...tarjetasActivas().map(t => ['t:' + t.id, '💳 ' + t.nombre])], p.cobroCon || '')}</div>
+    <label class="lbl solo-sus">Nombre de la cuenta de ahorros (opcional)
+      <input name="cuentaDebito" value="${esc(p.cuentaDebito || '')}" placeholder="Ej. BCP ahorros"></label>
+    <p class="muted small solo-sus">Si eliges una tarjeta de crédito, cada cobro también se suma a lo que pagarás en esa tarjeta.</p>
     <label class="lbl solo-tarjeta">Día de cierre o fecha de corte (opcional)
       <input name="corte" type="number" min="1" max="31" inputmode="numeric" value="${p.corte || ''}" placeholder="Ej. 28 — lo ves en tu estado de cuenta">
     </label>
@@ -749,17 +832,18 @@ function formPago(p) {
       <input name="consumoMin" inputmode="decimal" value="${p.consumoMin || ''}" placeholder="Ej. 300 — si tu tarjeta exige gastar un mínimo">
     </label>
     <p class="muted small solo-tarjeta">Te muestro cuánto llevas comprado con la tarjeta y cuánto falta para llegar al mínimo.</p>
-    <span class="lbl">Monto habitual (opcional)</span>
+    <span class="lbl"><span class="no-sus-txt">Monto habitual (opcional)</span><span class="solo-sus-txt">Monto que se cobra cada mes</span></span>
     <div class="monto-box chico">
       ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], p.moneda || 'PEN')}
       <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${p.monto || ''}" aria-label="Monto habitual">
     </div>
-    <p class="muted small">Se propone al tocar “+ Sumar”. No se cobra solo, salvo que marques la opción de abajo.</p>
-    <label class="check-lbl"><input type="checkbox" name="auto" ${p.auto ? 'checked' : ''}> Sumar este monto automáticamente cada mes</label>
-    <p class="muted small">Para montos fijos, como YT Music o un plan postpago. Se suma el día 1 de cada mes.</p>
-    ${nuevo ? `<label class="lbl">¿Ya debes algo ahora? (opcional)
+    <p class="muted small no-sus">Se propone al tocar “+ Sumar”. No se cobra solo, salvo que marques la opción de abajo.</p>
+    <label class="check-lbl no-sus"><input type="checkbox" name="auto" ${p.auto ? 'checked' : ''}> Sumar este monto al contador cada mes</label>
+    <p class="muted small no-sus">Para recibos fijos que pagas tú, como un plan postpago. Se suma el día 1 de cada mes.</p>
+    ${nuevo || !esSus(p) ? `<label class="check-lbl solo-sus"><input type="checkbox" name="cobradoEsteMes"> Ya se cobró este mes: registrarlo también</label>` : ''}
+    ${nuevo ? `<label class="lbl no-sus">¿Ya debes algo ahora? (opcional)
       <input name="inicial" inputmode="decimal" placeholder="Ej. 455.00 — se suma al contador"></label>` : ''}
-    <label class="lbl">Categoría al registrar el pago como gasto
+    <label class="lbl">Categoría del gasto
       <select name="categoria"><option value="">Automática según el tipo</option>${opciones(categorias(p.categoria || undefined).map(c => [c, c]), p.categoria)}</select>
     </label>
     <label class="lbl">Nota (opcional)<input name="nota" value="${esc(p.nota)}" placeholder="Ej. tarjeta con cashback"></label>
@@ -935,6 +1019,7 @@ function guardarPagoFijo(f, fd) {
     nombre = marca === 'Otra' ? nombreCorto : `${marca} ${nombreCorto}`;
   }
   const id0 = f.dataset.id;
+  if (tipo === 'Suscripción' && !(monto > 0)) { toast('Escribe el monto que se cobra cada mes'); return; }
   const choca = db.pagos.find(x => x.id !== id0 && x.activo !== false && x.tipo === tipo &&
     claveCuenta(x) === claveCuenta({ nombre }) && marcasCompatibles(x, { nombre, marca }));
   if (choca) {
@@ -949,9 +1034,14 @@ function guardarPagoFijo(f, fd) {
   };
   const id = f.dataset.id;
   let p;
+  let reactivada = false, eraSus = false;
   if (id) {
     p = db.pagos.find(x => x.id === id);
+    reactivada = p.activo === false && fd.activo === 'on';
+    eraSus = esSus(p);
     Object.assign(p, datos, { activo: fd.activo === 'on' });
+    if (reactivada) delete p.canceladaEn;
+    if (p.activo === false && esSus(p) && !p.canceladaEn) p.canceladaEn = hoyStr();
   } else {
     p = { id: uid(), ...datos, activo: true, cargos: [], abonos: [], v: 3, creado: ahora };
     db.pagos.push(p);
@@ -959,6 +1049,15 @@ function guardarPagoFijo(f, fd) {
   if (datos.tipo === 'Tarjeta' && corte) p.corte = corte; else delete p.corte;
   if (datos.tipo === 'Tarjeta') { p.marca = marca; p.nombreCorto = nombreCorto; if (consumoMin > 0) p.consumoMin = consumoMin; else delete p.consumoMin; }
   else { delete p.marca; delete p.nombreCorto; delete p.consumoMin; }
+  if (esSus(p)) {
+    p.auto = false;
+    p.cobroCon = fd.cobroCon || '';
+    if (p.cobroCon) delete p.cuentaDebito; else if ((fd.cuentaDebito || '').trim()) p.cuentaDebito = fd.cuentaDebito.trim(); else delete p.cuentaDebito;
+    if (!p.desdeCobro || reactivada || !eraSus) {
+      const ym = mesStr(new Date());
+      p.desdeCobro = fd.cobradoEsteMes === 'on' ? ym : proximoDiaPago(p, hoyStr()).slice(0, 7);
+    }
+  } else { delete p.cobroCon; delete p.cuentaDebito; delete p.desdeCobro; }
   if (p.auto && !p.autoDesde) p.autoDesde = proximoDiaPago(p, hoyStr()).slice(0, 7);  // el primer cargo no nace vencido
   if (!p.auto) delete p.autoDesde;
   if (inicial > 0) p.cargos.push({ id: uid(), fecha: hoyStr(), monto: inicial, moneda: datos.moneda, nota: 'Monto pendiente inicial' });
@@ -1053,14 +1152,16 @@ const MESES_RE = MESES.map(norm).join('|');
 const DIAS_N = DIAS.map(norm);
 
 const CLAVES_CATEGORIA = {
-  'Mercado y comida': 'mercado supermercado comida almuerzo cena desayuno lonche pollo carne pescado verdura verduras fruta frutas pan abarrotes bodega plaza vea tottus metro wong makro restaurante menu delivery chifa polleria cafe leche huevos arroz',
+  'Alimentos': 'mercado supermercado pollo carne pescado verdura verduras fruta frutas pan abarrotes bodega plaza vea tottus metro wong makro leche huevos arroz azucar aceite viveres',
+  'Restaurante': 'restaurante menu almuerzo cena desayuno lonche delivery chifa polleria cafe cafeteria pizza hamburguesa ceviche cevicheria rappi pedidosya comida',
+  'Pago automático': 'netflix spotify disney hbo youtube prime suscripcion icloud',
   'Servicios': 'luz agua internet cable telefono celular gas sedapal enel claro movistar entel bitel recibo recarga plan',
   'Tarjetas': 'tarjeta visa mastercard credito bcp interbank bbva scotiabank diners amex cuota',
   'Transporte': 'taxi pasaje pasajes combi bus micro gasolina combustible grifo uber cabify didi indriver estacionamiento cochera peaje carro auto mecanico taller',
   'Salud': 'farmacia medicina medicinas medicamento doctor medico clinica consulta inkafarma mifarma boticas dentista analisis hospital seguro',
   'Educación': 'colegio pension universidad curso cursos libro libros utiles matricula academia instituto clases',
   'Hogar': 'ferreteria limpieza detergente mueble muebles reparacion gasfitero electricista alquiler departamento casa sodimac promart',
-  'Ocio': 'cine netflix spotify disney salida juego juegos viaje cumpleanos regalo fiesta paseo hbo youtube',
+
   'Ropa': 'ropa zapatillas zapatos polo polos pantalon camisa casaca vestido saga ripley oechsle'
 };
 const CLAVES_AREA = {
@@ -1495,7 +1596,7 @@ async function descargarExcel(periodo) {
       [null, null, F_S, null, null],
       (i, f) => ['Total pagado', '', sumaCol('C', i, f, suma(abonos.map(a => a.soles))), '', '']);
   }
-  const saldos = db.pagos.filter(p => p.activo !== false).map(cuenta).filter(c => c.saldo > 0);
+  const saldos = db.pagos.filter(p => p.activo !== false && !esSus(p)).map(cuenta).filter(c => c.saldo > 0);
   if (saldos.length) {
     tabla(`Cuentas por pagar al ${fechaCorta(hoy)}`, ['Cuenta', 'Saldo (S/)', 'Vence', 'Vencido (S/)', 'Tipo'],
       saldos.map(c => [c.p.nombre, c.saldo, fechaCorta(c.vence), c.vencido || null, c.p.tipo]),
@@ -1525,7 +1626,7 @@ async function descargarExcel(periodo) {
     const r = wd.addRow({
       fecha: new Date(Date.UTC(y, m - 1, d)),
       categoria: g.categoria, nota: g.nota || '', moneda: g.moneda === 'USD' ? 'US$' : 'S/',
-      monto: g.monto, tc: g.moneda === 'USD' ? (g.tc || tc) : null, soles: enSoles(g), fijo: g.pagoId ? 'Sí' : '', medio: medioTexto(g)
+      monto: g.monto, tc: g.moneda === 'USD' ? (g.tc || tc) : null, soles: enSoles(g), fijo: g.pagoId ? 'Sí' : g.suscripcionId ? 'Automático' : '', medio: medioTexto(g)
     });
     r.getCell('monto').numFmt = g.moneda === 'USD' ? F_U : F_S;
   });
@@ -1652,6 +1753,28 @@ document.addEventListener('click', e => {
     case 'sumar-cargo': abrirSheet(formCargo(db.pagos.find(p => p.id === id))); break;
     case 'historial': abrirSheet(formHistorial(db.pagos.find(p => p.id === id))); break;
     case 'historial-pagos': abrirSheet(formPagosHechos()); break;
+    case 'sus-historial': {
+      const p = db.pagos.find(x => x.id === id);
+      const lista = db.gastos.filter(g => g.suscripcionId === id).sort(ordenGastos);
+      abrirSheet(`<h2>${esc(p.nombre)}</h2>
+        <p class="muted">${fmt(p.monto, p.moneda)} al mes · se cobra el ${p.dia} de ${esc(textoCobro(p))}</p>
+        <section class="card resumen"><p class="muted">Cobrado en total</p><p class="cifra sm">${soles(suma(lista.map(enSoles)))}</p></section>
+        ${lista.length ? `<div class="card lista">${lista.map(filaGasto).join('')}</div>` : vacio('Aún no hay cobros registrados. El primero será el ' + fechaCorta(proximoDiaPago(p, hoyStr())) + '.')}`);
+      break;
+    }
+    case 'cancelar-sus': {
+      const p = db.pagos.find(x => x.id === id);
+      if (!confirm(`¿Cancelar la suscripción “${p.nombre}”? Ya no se registrará el cobro desde ahora. Los cobros anteriores se conservan.`)) return;
+      p.activo = false; p.canceladaEn = hoyStr(); p.actualizado = new Date().toISOString();
+      guardar(); toast(`${p.nombre} cancelada`); render(); break;
+    }
+    case 'reactivar-sus': {
+      const p = db.pagos.find(x => x.id === id);
+      p.activo = true; delete p.canceladaEn;
+      p.desdeCobro = proximoDiaPago(p, hoyStr()).slice(0, 7);
+      p.actualizado = new Date().toISOString();
+      guardar(); toast(`${p.nombre} reactivada · próximo cobro ${fechaCorta(proximoDiaPago(p, hoyStr()))}`); render(); break;
+    }
     case 'unir-elegir': abrirSheet(formUnir(el.dataset.ids.split(','), 'Unir cuentas repetidas',
       'Elige con cuál te quedas. Sus montos, pagos y compras se juntan en una sola; no se pierde nada.')); break;
     case 'unir-manual': {
@@ -1691,8 +1814,12 @@ document.addEventListener('click', e => {
     }
     case 'toggle-tarea': toggleTarea(id); break;
     case 'eliminar-gasto': {
-      if (!confirm('¿Eliminar este gasto?')) return;
       const g = db.gastos.find(x => x.id === id);
+      if (!confirm(g && g.suscripcionId ? '¿Eliminar este cobro automático? No se volverá a registrar para ese mes.' : '¿Eliminar este gasto?')) return;
+      if (g && g.suscripcionId) {
+        const p = db.pagos.find(x => x.id === g.suscripcionId);
+        if (p) { p.saltados = p.saltados || {}; p.saltados[g.id.slice(-7)] = true; }
+      }
       if (g && g.pagoId) {
         const p = db.pagos.find(x => x.id === g.pagoId);
         if (p && p.abonos) p.abonos = p.abonos.filter(a => a.gastoId !== id);

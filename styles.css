@@ -164,6 +164,14 @@ div.solo-tarjeta { flex-direction: column; }
 .minimo .barra-txt { font-size: .82rem; margin: 0; }
 .minimo.alerta .barra-relleno { background: var(--warn); }
 .minimo.alerta .barra-txt strong { color: var(--warn); }
+.solo-sus, .solo-sus-txt { display: none !important; }
+form:has(input[name=tipo][value="Suscripción"]:checked) .solo-sus { display: flex !important; }
+form:has(input[name=tipo][value="Suscripción"]:checked) p.solo-sus { display: block !important; }
+form:has(input[name=tipo][value="Suscripción"]:checked) .solo-sus-txt { display: inline !important; }
+form:has(input[name=tipo][value="Suscripción"]:checked) .no-sus,
+form:has(input[name=tipo][value="Suscripción"]:checked) .no-sus-txt { display: none !important; }
+div.solo-sus { flex-direction: column; }
+.danger-txt { color: var(--danger); }
 .lista-cuentas { display: flex; flex-direction: column; gap: 10px; }
 .cuenta { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); }
 .card .cuenta { border: 0; box-shadow: none; padding: 10px 0; border-radius: 0; border-bottom: 1px solid var(--border); }
