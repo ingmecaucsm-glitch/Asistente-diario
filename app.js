@@ -5,7 +5,7 @@
    ========================================================= */
 
 const STORAGE_KEY = 'misecretaria.datos.v1';
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 const CATEGORIAS_BASE = ['Mercado y comida', 'Servicios', 'Tarjetas', 'Transporte', 'Salud', 'Educación', 'Hogar', 'Ocio', 'Ropa', 'Otros'];
 const AREAS = ['Hogar', 'Trabajo', 'Personal', 'Familia'];
@@ -117,22 +117,99 @@ function gastosDelMes(ym) { return db.gastos.filter(g => g.fecha.startsWith(ym))
 function totalMes(ym) { return suma(gastosDelMes(ym).map(enSoles)); }
 const ordenGastos = (a, b) => b.fecha.localeCompare(a.fecha) || (b.creado || '').localeCompare(a.creado || '');
 
-function estadoPago(p, ym) {
+/* Pagos fijos
+   p.dia        día de vencimiento habitual
+   p.frecuencia 'mensual' (por defecto) | 'unico' (con p.fechaUnica)
+   p.desde      primer mes 'AAAA-MM' en que aplica
+   p.corte      día de cierre de la tarjeta (opcional)
+   p.montos[ym], p.monedas[ym], p.fechas[ym], p.omitidos[ym]  ajustes de un mes
+   p.pagados[ym] = { monto, moneda, tc, fecha, gastoId? }  (antes: id del gasto) */
+function diaDelMes(ym, dia) {
   const [y, m] = ym.split('-').map(Number);
-  const dim = new Date(y, m, 0).getDate();
-  const vence = `${ym}-${pad(Math.min(p.dia, dim))}`;
-  const gid = p.pagados && p.pagados[ym];
-  const gasto = gid ? db.gastos.find(g => g.id === gid) : null;
-  return { p, ym, vence, dias: diasEntre(hoyStr(), vence), pagado: !!gasto, gasto };
+  return `${ym}-${pad(Math.min(dia, new Date(y, m, 0).getDate()))}`;
+}
+function desdeDe(p) {
+  if (p.frecuencia === 'unico') return (p.fechaUnica || '0000-00').slice(0, 7);
+  if (p.desde) return p.desde;
+  if (!p.creado) return '0000-00';
+  const c = p.creado.slice(0, 10), ym = c.slice(0, 7);
+  return diaDelMes(ym, p.dia) < c ? sumarMes(ym, 1) : ym;
+}
+function aplicaEn(p, ym) {
+  if (p.frecuencia === 'unico') return !!p.fechaUnica && p.fechaUnica.startsWith(ym);
+  return ym >= desdeDe(p);
+}
+function registroPago(p, ym) {
+  const r = p.pagados && p.pagados[ym];
+  if (!r) return null;
+  if (typeof r === 'string') {
+    const g = db.gastos.find(x => x.id === r);
+    return g ? { monto: g.monto, moneda: g.moneda, tc: g.tc, fecha: g.fecha, gastoId: g.id } : null;
+  }
+  return r;
+}
+// Periodo de consumos (ciclo) que se cobra en el vencimiento indicado
+function cicloDe(p, vence) {
+  if (!p.corte) {
+    const ym = sumarMes(vence.slice(0, 7), -1);
+    return { desde: ym + '-01', hasta: diaDelMes(ym, 31), supuesto: true };
+  }
+  let ym = vence.slice(0, 7);
+  let hasta = diaDelMes(ym, p.corte);
+  if (hasta >= vence) { ym = sumarMes(ym, -1); hasta = diaDelMes(ym, p.corte); }
+  return { desde: sumarDias(diaDelMes(sumarMes(ym, -1), p.corte), 1), hasta };
+}
+const gastosTarjeta = (id, desde, hasta) => db.gastos.filter(g => g.tarjetaId === id && g.fecha >= desde && g.fecha <= hasta);
+function estadoPago(p, ym) {
+  const vence = (p.fechas && p.fechas[ym]) ||
+    (p.frecuencia === 'unico' && p.fechaUnica && p.fechaUnica.startsWith(ym) ? p.fechaUnica : diaDelMes(ym, p.dia));
+  const registro = registroPago(p, ym);
+  const ciclo = p.tipo === 'Tarjeta' && p.frecuencia !== 'unico' ? cicloDe(p, vence) : null;
+  const consumos = ciclo ? suma(gastosTarjeta(p.id, ciclo.desde, ciclo.hasta).map(enSoles)) : 0;
+  let monto, moneda, fuente;
+  if (p.montos && p.montos[ym] != null) { monto = p.montos[ym]; moneda = (p.monedas && p.monedas[ym]) || p.moneda || 'PEN'; fuente = 'estado'; }
+  else if (consumos > 0) { monto = Math.round(consumos * 100) / 100; moneda = 'PEN'; fuente = 'consumos'; }
+  else { monto = p.monto || 0; moneda = p.moneda || 'PEN'; fuente = 'aprox'; }
+  return {
+    p, ym, vence, dias: diasEntre(hoyStr(), vence), pagado: !!registro, registro,
+    omitido: !!(p.omitidos && p.omitidos[ym]), aplica: aplicaEn(p, ym) || !!registro,
+    ciclo, consumos, abierto: !!ciclo && ciclo.hasta >= hoyStr(), monto, moneda, fuente
+  };
+}
+const montoPagado = e => e.registro ? enSoles(e.registro) : 0;
+// Próximo vencimiento sin pagar (desde el mes actual)
+function siguienteVencimiento(p) {
+  if (p.frecuencia === 'unico') {
+    if (!p.fechaUnica) return null;
+    const e = estadoPago(p, p.fechaUnica.slice(0, 7));
+    return e.pagado || e.omitido ? null : e;
+  }
+  let ym = mesStr(new Date());
+  for (let i = 0; i < 14; i++, ym = sumarMes(ym, 1)) {
+    if (!aplicaEn(p, ym)) continue;
+    const e = estadoPago(p, ym);
+    if (!e.pagado && !e.omitido) return e;
+  }
+  return null;
+}
+// Ciclo de la tarjeta que está acumulando consumos hoy
+function cicloActual(p) {
+  let ym = sumarMes(mesStr(new Date()), -1);
+  const hoy = hoyStr();
+  for (let i = 0; i < 4; i++, ym = sumarMes(ym, 1)) {
+    const e = estadoPago(p, ym);
+    if (e.ciclo && e.ciclo.desde <= hoy && e.ciclo.hasta >= hoy) return e;
+  }
+  return null;
 }
 function pagosProximos(diasMax) {
-  const ym = mesStr(new Date());
-  return db.pagos.filter(p => p.activo !== false).map(p => {
-    let e = estadoPago(p, ym);
-    // Si ya se pagó este mes, o se creó después del vencimiento, mirar el mes siguiente
-    if (e.pagado || (p.creado && e.vence < p.creado.slice(0, 10))) e = estadoPago(p, sumarMes(ym, 1));
-    return e;
-  }).filter(e => !e.pagado && e.dias <= diasMax).sort((a, b) => a.dias - b.dias);
+  return db.pagos.filter(p => p.activo !== false).map(siguienteVencimiento)
+    .filter(e => e && e.dias <= diasMax).sort((a, b) => a.dias - b.dias);
+}
+const tarjetasActivas = () => db.pagos.filter(p => p.tipo === 'Tarjeta' && p.activo !== false && p.frecuencia !== 'unico');
+function medioTexto(g) {
+  if (g.tarjetaId) { const t = db.pagos.find(p => p.id === g.tarjetaId); return t ? t.nombre : 'Tarjeta'; }
+  return { efectivo: 'Efectivo', debito: 'Débito / Yape' }[g.medio] || '';
 }
 
 function tareasOrdenadas(lista) {
@@ -148,7 +225,7 @@ function categorias(extra) {
   return c;
 }
 function ultimaCategoria() {
-  const g = [...db.gastos].sort((a, b) => (b.creado || '').localeCompare(a.creado || ''))[0];
+  const g = db.gastos.filter(x => !x.pagoId).sort((a, b) => (b.creado || '').localeCompare(a.creado || ''))[0];
   return g ? g.categoria : db.ajustes.categorias[0];
 }
 
@@ -177,6 +254,7 @@ function vacio(texto, boton = '') { return `<div class="vacio"><p>${texto}</p>${
 
 function badgePago(e) {
   if (e.pagado) return `<span class="badge ok">Pagado</span>`;
+  if (e.omitido) return `<span class="badge">Sin pago este mes</span>`;
   if (e.dias < 0) return `<span class="badge danger">Vencido hace ${-e.dias} d</span>`;
   if (e.dias === 0) return `<span class="badge danger">Vence hoy</span>`;
   if (e.dias === 1) return `<span class="badge warn">Vence mañana</span>`;
@@ -185,20 +263,30 @@ function badgePago(e) {
 }
 function filaPago(e) {
   const p = e.p;
-  const monto = e.pagado ? fmt(e.gasto.monto, e.gasto.moneda) : (p.monto ? fmt(p.monto, p.moneda) : '—');
+  const monto = e.pagado ? fmt(e.registro.monto, e.registro.moneda) : e.omitido ? '—' : (e.monto ? fmt(e.monto, e.moneda) : '—');
+  const fuente = e.pagado || e.omitido || !e.monto ? ''
+    : { estado: 'estado de cuenta', consumos: e.abierto ? 'acumulando…' : 'según consumos', aprox: 'aprox.' }[e.fuente];
   const boton = e.pagado
     ? `<button class="btn-sm ghost" data-action="deshacer-pago" data-id="${p.id}" data-ym="${e.ym}">Deshacer</button>`
-    : `<button class="btn-sm primary" data-action="pagar" data-id="${p.id}" data-ym="${e.ym}">Pagar</button>`;
-  return `<div class="fila">
+    : e.omitido ? ''
+      : `<button class="btn-sm primary" data-action="pagar" data-id="${p.id}" data-ym="${e.ym}">Pagar</button>`;
+  const ciclo = e.ciclo && e.consumos > 0 && !e.pagado
+    ? `<span class="fila-sub">Consumos ${fechaCorta(e.ciclo.desde)} – ${fechaCorta(e.ciclo.hasta)}: <strong>${soles(e.consumos)}</strong>${e.abierto ? ' · sigue sumando' : ''}</span>` : '';
+  return `<div class="fila pago">
     <button class="fila-main" data-action="editar-pago" data-id="${p.id}">
-      <span class="fila-titulo">${esc(p.nombre)}</span>
+      <span class="fila-titulo">${esc(p.nombre)}${p.frecuencia === 'unico' ? ' <span class="badge">Una vez</span>' : ''}</span>
       <span class="fila-sub">${esc(p.tipo)} · vence ${fechaCorta(e.vence)}${p.nota ? ' · ' + esc(p.nota) : ''}</span>
+      ${ciclo}
     </button>
     <div class="fila-der">
       <span class="monto">${monto}</span>
+      ${fuente ? `<span class="fila-sub">${fuente}</span>` : ''}
       ${badgePago(e)}
     </div>
-    ${boton}
+    <div class="fila-acciones">
+      ${boton}
+      ${e.pagado ? '' : `<button class="link small" data-action="ajustar-mes" data-id="${p.id}" data-ym="${e.ym}">Ajustar mes</button>`}
+    </div>
   </div>`;
 }
 function filaTarea(t) {
@@ -222,7 +310,7 @@ function filaGasto(g) {
   return `<button class="fila fila-main gasto" data-action="editar-gasto" data-id="${g.id}">
     <span class="fila-izq">
       <span class="fila-titulo">${esc(g.nota || g.categoria)}</span>
-      <span class="fila-sub">${esc(g.categoria)}${g.pagoId ? ' · pago fijo' : ''}</span>
+      <span class="fila-sub">${esc(g.categoria)}${g.pagoId ? ' · pago fijo' : ''}${medioTexto(g) ? ' · ' + esc(medioTexto(g)) : ''}</span>
     </span>
     <span class="fila-der">
       <span class="monto">${fmt(g.monto, g.moneda)}</span>
@@ -356,21 +444,41 @@ function vistaPagos() {
   const activos = db.pagos.filter(p => p.activo !== false);
   const inactivos = db.pagos.filter(p => p.activo === false);
   if (!db.pagos.length) {
-    return vacio(`<strong>Tus pagos fijos del mes</strong><br>Agrega tarjetas de crédito, luz, agua, internet, celular, colegio, alquiler…
-      Te avisaré cuándo vence cada uno y al marcarlo como pagado se registra solo como gasto.`,
+    return vacio(`<strong>Tus pagos fijos y tarjetas</strong><br>Agrega tarjetas de crédito, luz, agua, internet, celular, colegio, alquiler…
+      Te avisaré cuándo vence cada uno. Si registras tus compras con tarjeta, el monto a pagar se calcula solo.`,
       `<button class="btn primary" data-action="nuevo-pago">Agregar tarjeta o servicio</button>`);
   }
-  const estados = activos.map(p => estadoPago(p, ym)).sort((a, b) => a.p.dia - b.p.dia);
-  const pagado = suma(estados.filter(e => e.pagado).map(e => enSoles(e.gasto)));
-  const porPagar = suma(estados.filter(e => !e.pagado && e.p.monto).map(e => enSoles({ monto: e.p.monto, moneda: e.p.moneda })));
-  const nPend = estados.filter(e => !e.pagado).length;
+  const estados = db.pagos.filter(p => p.activo !== false || registroPago(p, ym))
+    .map(p => estadoPago(p, ym)).filter(e => e.aplica).sort((a, b) => a.vence.localeCompare(b.vence));
+  const pagado = suma(estados.map(montoPagado));
+  const pend = estados.filter(e => !e.pagado && !e.omitido);
+  const porPagar = suma(pend.map(e => enSoles({ monto: e.monto, moneda: e.moneda })));
+
+  let ciclos = '';
+  if (ym === mesStr(new Date())) {
+    const abiertos = tarjetasActivas().map(cicloActual).filter(e => e && (e.consumos > 0 || e.p.corte));
+    if (abiertos.length) {
+      ciclos = `<section class="card">
+        <div class="card-head"><h3>Tarjetas: consumos del ciclo actual</h3></div>
+        ${abiertos.map(e => `<div class="fila">
+          <button class="fila-main" data-action="ver-consumos" data-id="${e.p.id}" data-ym="${e.ym}">
+            <span class="fila-titulo">${esc(e.p.nombre)}</span>
+            <span class="fila-sub">${fechaCorta(e.ciclo.desde)} – ${fechaCorta(e.ciclo.hasta)}${e.ciclo.supuesto ? ' (mes calendario)' : ''} · se paga el ${fechaCorta(e.vence)}</span>
+          </button>
+          <div class="fila-der"><span class="monto">${soles(e.consumos)}</span><span class="fila-sub">${gastosTarjeta(e.p.id, e.ciclo.desde, e.ciclo.hasta).length} compras</span></div>
+        </div>`).join('')}
+      </section>`;
+    }
+  }
 
   return `${selectorMes(ym, 'mes-pagos')}
   <section class="card resumen dos">
     <div><p class="muted">Pagado</p><p class="cifra sm txt-ok">${soles(pagado)}</p></div>
-    <div><p class="muted">Por pagar (estimado)</p><p class="cifra sm">${soles(porPagar)}</p><p class="muted small">${nPend} ${nPend === 1 ? 'pendiente' : 'pendientes'}</p></div>
+    <div><p class="muted">Por pagar</p><p class="cifra sm">${soles(porPagar)}</p><p class="muted small">${pend.length} ${pend.length === 1 ? 'pendiente' : 'pendientes'}</p></div>
   </section>
-  <section class="card lista">${estados.map(filaPago).join('')}</section>
+  ${ciclos}
+  ${estados.length ? `<section class="card lista">${estados.map(filaPago).join('')}</section>`
+    : vacio(`No hay pagos que venzan en ${MESES[Number(ym.slice(5)) - 1]}.`)}
   ${inactivos.length ? `<details class="card"><summary>Pausados (${inactivos.length})</summary>
     ${inactivos.map(p => `<button class="fila fila-main" data-action="editar-pago" data-id="${p.id}"><span class="fila-titulo">${esc(p.nombre)}</span><span class="fila-sub">${esc(p.tipo)} · día ${p.dia}</span></button>`).join('')}
   </details>` : ''}`;
@@ -475,7 +583,11 @@ function formMenu() {
 
 function formGasto(g, defaults = {}) {
   const nuevo = !g;
-  g = g || { monto: defaults.monto || '', moneda: defaults.moneda || 'PEN', categoria: defaults.categoria || ultimaCategoria(), nota: defaults.nota || '', fecha: defaults.fecha || hoyStr() };
+  g = g || { monto: defaults.monto || '', moneda: defaults.moneda || 'PEN', categoria: defaults.categoria || ultimaCategoria(), nota: defaults.nota || '', fecha: defaults.fecha || hoyStr(), medio: defaults.medio || '', tarjetaId: defaults.tarjetaId };
+  const tarjetas = tarjetasActivas();
+  if (g.tarjetaId && !tarjetas.some(t => t.id === g.tarjetaId)) { const t = db.pagos.find(x => x.id === g.tarjetaId); if (t) tarjetas.push(t); }
+  const medioSel = g.tarjetaId ? 't:' + g.tarjetaId : (g.medio || '');
+  const medios = [['', 'Sin indicar'], ['efectivo', 'Efectivo'], ['debito', 'Débito / Yape'], ...tarjetas.map(t => ['t:' + t.id, '💳 ' + t.nombre])];
   const notas = [...new Set(db.gastos.slice(-200).map(x => x.nota).filter(Boolean))].slice(-30);
   const pago = g.pagoId ? db.pagos.find(p => p.id === g.pagoId) : null;
   return `<h2>${nuevo ? 'Nuevo gasto' : 'Editar gasto'}</h2>
@@ -492,7 +604,9 @@ function formGasto(g, defaults = {}) {
     </label>
     <datalist id="sugNotas">${notas.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
     <label class="lbl">Fecha<input type="date" name="fecha" value="${g.fecha}" required></label>
-    ${pago ? `<p class="muted small">Vinculado al pago fijo “${esc(pago.nombre)}”.</p>` : ''}
+    ${pago ? `<p class="muted small">Vinculado al pago fijo “${esc(pago.nombre)}”.</p>` : `<span class="lbl">¿Con qué pagaste?</span>
+    ${chipsRadio('pagoCon', medios, medioSel)}
+    ${tarjetas.length ? '<p class="muted small">Si eliges una tarjeta de crédito, el monto se suma a lo que pagarás en esa tarjeta.</p>' : ''}`}
     <div class="acciones">
       ${nuevo ? '' : `<button type="button" class="btn danger-ghost" data-action="eliminar-gasto" data-id="${g.id}">Eliminar</button>`}
       <span class="spacer"></span>
@@ -533,22 +647,35 @@ function formTarea(t, pre = {}) {
 
 function formPago(p) {
   const nuevo = !p;
-  p = p || { nombre: '', tipo: 'Tarjeta', dia: '', monto: '', moneda: 'PEN', categoria: '', nota: '', activo: true };
-  return `<h2>${nuevo ? 'Nuevo pago fijo' : 'Editar pago fijo'}</h2>
+  p = p || { nombre: '', tipo: 'Tarjeta', frecuencia: 'mensual', monto: '', moneda: 'PEN', categoria: '', nota: '', activo: true };
+  let fecha = '';
+  if (!nuevo) {
+    if (p.frecuencia === 'unico') fecha = p.fechaUnica || '';
+    else { const e = siguienteVencimiento(p); fecha = e ? e.vence : diaDelMes(mesStr(new Date()), p.dia); }
+  }
+  return `<h2>${nuevo ? 'Nuevo pago' : 'Editar pago'}</h2>
   <form id="fPago" class="form" data-id="${nuevo ? '' : p.id}" autocomplete="off">
-    <label class="lbl">Nombre<input name="nombre" value="${esc(p.nombre)}" required placeholder="Ej. Visa BCP, Luz del Sur, Internet" data-autofocus></label>
+    <label class="lbl">Nombre<input name="nombre" value="${esc(p.nombre)}" required placeholder="Ej. Tarjeta iO, Luz del Sur, Internet" data-autofocus></label>
     <span class="lbl">Tipo</span>
     ${chipsRadio('tipo', TIPOS_PAGO.map(t => [t, t]), p.tipo)}
-    <label class="lbl">Día de vencimiento (cada mes)<input name="dia" type="number" min="1" max="31" inputmode="numeric" value="${p.dia}" required placeholder="Ej. 15"></label>
-    <span class="lbl">Monto aproximado (opcional)</span>
+    <span class="lbl">¿Cada cuánto?</span>
+    ${segmento('frecuencia', [['mensual', 'Cada mes'], ['unico', 'Una sola vez']], p.frecuencia === 'unico' ? 'unico' : 'mensual')}
+    <label class="lbl">Próximo vencimiento (día, mes y año)<input type="date" name="fecha" value="${fecha}" required></label>
+    <p class="muted small solo-mensual">Se repetirá el mismo día cada mes. Si algún mes cambia la fecha o el monto, usa “Ajustar mes” en la lista.</p>
+    <label class="lbl solo-tarjeta">Día de cierre o fecha de corte (opcional)
+      <input name="corte" type="number" min="1" max="31" inputmode="numeric" value="${p.corte || ''}" placeholder="Ej. 28 — lo ves en tu estado de cuenta">
+    </label>
+    <p class="muted small solo-tarjeta">Con el día de corte sé qué compras entran en cada pago. Si lo dejas vacío, sumo las compras del mes anterior al vencimiento.</p>
+    <span class="lbl">Monto habitual (opcional)</span>
     <div class="monto-box chico">
-      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], p.moneda)}
-      <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${p.monto || ''}" aria-label="Monto aproximado">
+      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], p.moneda || 'PEN')}
+      <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${p.monto || ''}" aria-label="Monto habitual">
     </div>
+    <p class="muted small solo-tarjeta">En tarjetas, si registras tus compras con ella, el monto se calcula solo.</p>
     <label class="lbl">Categoría del gasto
       <select name="categoria"><option value="">Automática según el tipo</option>${opciones(categorias(p.categoria || undefined).map(c => [c, c]), p.categoria)}</select>
     </label>
-    <label class="lbl">Nota (opcional)<input name="nota" value="${esc(p.nota)}" placeholder="Ej. fecha de corte el 28"></label>
+    <label class="lbl">Nota (opcional)<input name="nota" value="${esc(p.nota)}" placeholder="Ej. tarjeta con cashback"></label>
     <p class="muted small">No guardes números completos de tarjeta ni claves aquí.</p>
     ${nuevo ? '' : `<label class="check-lbl"><input type="checkbox" name="activo" ${p.activo !== false ? 'checked' : ''}> Activo (desmarca para pausarlo)</label>`}
     <div class="acciones">
@@ -559,17 +686,53 @@ function formPago(p) {
   </form>`;
 }
 
+function formAjusteMes(p, ym) {
+  const e = estadoPago(p, ym);
+  const tieneMonto = p.montos && p.montos[ym] != null;
+  return `<h2>${esc(p.nombre)} · ${nombreMes(ym)}</h2>
+  <p class="muted small">Cambia solo este mes, por ejemplo con el monto y la fecha de tu estado de cuenta. Los demás meses no se modifican.</p>
+  <form id="fAjusteMes" class="form" data-id="${p.id}" data-ym="${ym}" autocomplete="off">
+    <span class="lbl">Monto a pagar este mes</span>
+    <div class="monto-box">
+      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], tieneMonto ? e.moneda : (p.moneda || 'PEN'))}
+      <input class="monto-input" name="monto" inputmode="decimal" placeholder="${e.monto ? nf.format(e.monto) : '0.00'}" value="${tieneMonto ? p.montos[ym] : ''}" aria-label="Monto del mes" data-autofocus>
+    </div>
+    <p class="muted small">${e.consumos > 0 ? `Compras registradas en este ciclo: ${soles(e.consumos)}. ` : ''}Déjalo vacío para usar ${e.consumos > 0 ? 'las compras registradas' : 'el monto habitual'}.</p>
+    <label class="lbl">Fecha de pago de este mes<input type="date" name="fecha" value="${e.vence}" required></label>
+    <label class="check-lbl"><input type="checkbox" name="omitir" ${e.omitido ? 'checked' : ''}> Este mes no hay que pagar</label>
+    <div class="acciones">
+      <button type="button" class="btn danger-ghost" data-action="quitar-ajuste" data-id="${p.id}" data-ym="${ym}">Quitar ajustes</button>
+      <span class="spacer"></span>
+      <button type="submit" class="btn primary">Guardar</button>
+    </div>
+  </form>`;
+}
+
+function formConsumos(p, ym) {
+  const e = estadoPago(p, ym);
+  const lista = gastosTarjeta(p.id, e.ciclo.desde, e.ciclo.hasta).sort(ordenGastos);
+  return `<h2>${esc(p.nombre)}</h2>
+  <p class="muted">Compras del ${fechaCorta(e.ciclo.desde)} al ${fechaCorta(e.ciclo.hasta)} · se pagan el ${fechaLarga(e.vence).toLowerCase()}</p>
+  <section class="card resumen"><p class="muted">Total acumulado</p><p class="cifra">${soles(e.consumos)}</p></section>
+  ${lista.length ? `<div class="card lista">${lista.map(filaGasto).join('')}</div>` : vacio('Aún no hay compras registradas con esta tarjeta en este ciclo.')}`;
+}
+
 function formPagar(p, ym, pre = {}) {
   const e = estadoPago(p, ym);
+  const yaComoGastos = e.consumos > 0;
   return `<h2>Pagar ${esc(p.nombre)}</h2>
-  <p class="muted">Vence el ${fechaLarga(e.vence).toLowerCase()}. Se registrará como gasto.</p>
+  <p class="muted">Vence el ${fechaLarga(e.vence).toLowerCase()}.</p>
   <form id="fPagar" class="form" data-id="${p.id}" data-ym="${ym}" autocomplete="off">
     <div class="monto-box">
-      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], pre.moneda || p.moneda || 'PEN')}
-      <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${pre.monto || p.monto || ''}" required aria-label="Monto pagado" data-autofocus>
+      ${segmento('moneda', [['PEN', 'S/'], ['USD', 'US$']], pre.moneda || e.moneda || 'PEN')}
+      <input class="monto-input" name="monto" inputmode="decimal" placeholder="0.00" value="${pre.monto || e.monto || ''}" required aria-label="Monto pagado" data-autofocus>
     </div>
     <p class="muted small" id="equiv">&nbsp;</p>
     <label class="lbl">Fecha de pago<input type="date" name="fecha" value="${pre.fecha || hoyStr()}" required></label>
+    <label class="check-lbl"><input type="checkbox" name="comoGasto" ${yaComoGastos ? '' : 'checked'}> Contarlo también como gasto del mes</label>
+    <p class="muted small">${yaComoGastos
+      ? `Tus compras con esta tarjeta (${soles(e.consumos)}) ya están registradas como gastos. Déjalo desmarcado para no contarlas dos veces.`
+      : 'Márcalo si no registraste por separado lo que pagas aquí (por ejemplo, un recibo de luz).'}</p>
     <div class="acciones"><span class="spacer"></span><button type="submit" class="btn primary">Marcar como pagado</button></div>
   </form>`;
 }
@@ -580,18 +743,25 @@ function guardarGasto(f, fd, submitter) {
   if (!(monto > 0)) { toast('Escribe un monto válido'); f.monto.focus(); return; }
   const ahora = new Date().toISOString();
   const datos = { monto, moneda: fd.moneda, categoria: fd.categoria || 'Otros', nota: (fd.nota || '').trim(), fecha: fd.fecha || hoyStr(), actualizado: ahora };
+  if (fd.pagoCon !== undefined) {
+    const v = fd.pagoCon || '';
+    datos.tarjetaId = v.startsWith('t:') ? v.slice(2) : undefined;
+    datos.medio = v.startsWith('t:') ? 'tarjeta' : (v || undefined);
+  }
   const id = f.dataset.id;
   if (id) {
     const g = db.gastos.find(x => x.id === id);
     datos.tc = fd.moneda === 'USD' ? (g.moneda === 'USD' && g.tc ? g.tc : db.ajustes.tc) : undefined;
     Object.assign(g, datos);
+    Object.keys(g).forEach(k => { if (g[k] === undefined) delete g[k]; });
   } else {
     datos.tc = fd.moneda === 'USD' ? db.ajustes.tc : undefined;
     db.gastos.push({ id: uid(), ...datos, creado: ahora });
   }
   guardar();
-  toast(`Gasto de ${fmt(monto, fd.moneda)} guardado`);
-  if (submitter && submitter.name === 'otro') abrirSheet(formGasto(null, { fecha: datos.fecha, categoria: datos.categoria, moneda: datos.moneda }));
+  const tarj = datos.tarjetaId && db.pagos.find(p => p.id === datos.tarjetaId);
+  toast(`Gasto de ${fmt(monto, fd.moneda)} guardado${tarj ? ' · sumado a ' + tarj.nombre : ''}`);
+  if (submitter && submitter.name === 'otro') abrirSheet(formGasto(null, { fecha: datos.fecha, categoria: datos.categoria, moneda: datos.moneda, medio: datos.medio, tarjetaId: datos.tarjetaId }));
   else cerrarSheet();
   render();
 }
@@ -611,17 +781,49 @@ function guardarTarea(f, fd) {
 }
 
 function guardarPagoFijo(f, fd) {
-  const dia = parseInt(fd.dia, 10);
-  if (!(dia >= 1 && dia <= 31)) { toast('El día debe estar entre 1 y 31'); return; }
+  if (!fd.fecha) { toast('Elige la fecha del próximo vencimiento'); return; }
   const monto = fd.monto ? parseMonto(fd.monto) : 0;
   if (Number.isNaN(monto)) { toast('El monto no es válido'); return; }
+  const corte = fd.corte ? parseInt(fd.corte, 10) : null;
+  if (corte !== null && !(corte >= 1 && corte <= 31)) { toast('El día de corte debe estar entre 1 y 31'); return; }
   const ahora = new Date().toISOString();
-  const datos = { nombre: fd.nombre.trim(), tipo: fd.tipo || 'Otro', dia, monto: monto || 0, moneda: fd.moneda || 'PEN', categoria: fd.categoria || '', nota: (fd.nota || '').trim(), actualizado: ahora };
+  const unico = fd.frecuencia === 'unico';
+  const datos = {
+    nombre: fd.nombre.trim(), tipo: fd.tipo || 'Otro', frecuencia: unico ? 'unico' : 'mensual',
+    dia: Number(fd.fecha.slice(8, 10)), monto: monto || 0, moneda: fd.moneda || 'PEN',
+    categoria: fd.categoria || '', nota: (fd.nota || '').trim(), actualizado: ahora
+  };
+  if (unico) { datos.fechaUnica = fd.fecha; datos.desde = fd.fecha.slice(0, 7); }
+  else datos.desde = fd.fecha.slice(0, 7);
+  if (datos.tipo === 'Tarjeta' && corte) datos.corte = corte;
   const id = f.dataset.id;
-  if (id) Object.assign(db.pagos.find(p => p.id === id), datos, { activo: fd.activo === 'on' });
-  else db.pagos.push({ id: uid(), ...datos, activo: true, pagados: {}, creado: ahora });
+  if (id) {
+    const p = db.pagos.find(x => x.id === id);
+    if (p.fechas && p.fechas[datos.desde]) delete p.fechas[datos.desde];
+    Object.assign(p, datos, { activo: fd.activo === 'on' });
+    if (!unico) delete p.fechaUnica;
+    if (!(datos.tipo === 'Tarjeta' && corte)) delete p.corte;
+  } else db.pagos.push({ id: uid(), ...datos, activo: true, pagados: {}, creado: ahora });
   guardar();
-  toast('Pago fijo guardado');
+  toast(`Guardado · próximo vencimiento ${fechaCorta(fd.fecha)}`);
+  cerrarSheet();
+  render();
+}
+
+function guardarAjusteMes(f, fd) {
+  const p = db.pagos.find(x => x.id === f.dataset.id);
+  const ym = f.dataset.ym;
+  const monto = fd.monto ? parseMonto(fd.monto) : null;
+  if (monto !== null && Number.isNaN(monto)) { toast('El monto no es válido'); return; }
+  for (const k of ['montos', 'monedas', 'fechas', 'omitidos']) p[k] = p[k] || {};
+  if (monto !== null) { p.montos[ym] = monto; p.monedas[ym] = fd.moneda || 'PEN'; }
+  else { delete p.montos[ym]; delete p.monedas[ym]; }
+  const base = p.frecuencia === 'unico' ? p.fechaUnica : diaDelMes(ym, p.dia);
+  if (fd.fecha && fd.fecha !== base) p.fechas[ym] = fd.fecha; else delete p.fechas[ym];
+  if (fd.omitir === 'on') p.omitidos[ym] = true; else delete p.omitidos[ym];
+  p.actualizado = new Date().toISOString();
+  guardar();
+  toast(`${p.nombre}: ${nombreMes(ym)} actualizado`);
   cerrarSheet();
   render();
 }
@@ -631,14 +833,19 @@ function registrarPago(f, fd) {
   const monto = parseMonto(fd.monto);
   if (!(monto > 0)) { toast('Escribe el monto pagado'); return; }
   const ahora = new Date().toISOString();
-  const g = {
-    id: uid(), monto, moneda: fd.moneda, tc: fd.moneda === 'USD' ? db.ajustes.tc : undefined,
-    categoria: p.categoria || CATEGORIA_POR_TIPO[p.tipo] || 'Otros', nota: p.nombre, fecha: fd.fecha || hoyStr(),
-    pagoId: p.id, creado: ahora, actualizado: ahora
-  };
-  db.gastos.push(g);
+  const reg = { monto, moneda: fd.moneda, fecha: fd.fecha || hoyStr() };
+  if (fd.moneda === 'USD') reg.tc = db.ajustes.tc;
+  if (fd.comoGasto === 'on') {
+    const g = {
+      id: uid(), monto, moneda: fd.moneda, tc: reg.tc,
+      categoria: p.categoria || CATEGORIA_POR_TIPO[p.tipo] || 'Otros', nota: p.nombre, fecha: reg.fecha,
+      pagoId: p.id, creado: ahora, actualizado: ahora
+    };
+    db.gastos.push(g);
+    reg.gastoId = g.id;
+  }
   p.pagados = p.pagados || {};
-  p.pagados[f.dataset.ym] = g.id;
+  p.pagados[f.dataset.ym] = reg;
   guardar();
   toast(`${p.nombre} pagado ✓`);
   cerrarSheet();
@@ -824,27 +1031,47 @@ function limpiarFrase(s) {
 const RE_TAREA = /\b(recuerdame|recordarme|recordar|recuerda|acuerdame|tengo que|tenemos que|hay que|debo|debemos|pendiente|tarea|no olvidar|no olvides|no me olvide|agendar|agenda|anota que|apunta que)\b/;
 const RE_PAGO_VERBO = /\b(pague|he pagado|ya pague|pagado|cancele|pago de|pagar|abone)\b/;
 
+// Palabras útiles del nombre de un pago (iO, Visa, Luz, Sur…)
+const palabrasPago = p => norm(p.nombre).split(/[^a-z0-9]+/).filter(w => w.length >= 2 && !/^(del|de|la|las|los|el|por|para|con|tarjeta|credito)$/.test(w));
 // Devuelve el pago fijo mencionado. Con verbo de pago basta una palabra del nombre;
 // sin él, deben aparecer todas (así "gasté 85 en luz" no se confunde con "Luz del Sur").
-function buscarPagoFijo(n) {
-  const conVerbo = RE_PAGO_VERBO.test(n);
+function buscarPagoFijo(n, lista = db.pagos, conVerbo = RE_PAGO_VERBO.test(n)) {
   let mejor = null, puntos = 0;
-  for (const p of db.pagos) {
-    const palabras = norm(p.nombre).split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !/^(del|las|los|por|para|con)$/.test(w));
+  for (const p of lista) {
+    const palabras = palabrasPago(p);
+    if (!palabras.length) continue;
     const pts = palabras.filter(w => new RegExp(`\\b${w}\\b`).test(n)).length;
     if (!pts || (!conVerbo && pts < palabras.length)) continue;
     if (pts > puntos) { puntos = pts; mejor = p; }
   }
   return mejor;
 }
+// "… con la tarjeta iO", "con mi visa", "en efectivo", "con yape"
+function medioEnTexto(t) {
+  const m = t.n.match(/\b(?:con|usando|en|por) (?:mi |la |el )?(?:tarjeta (?:de credito )?)?([a-z0-9 ]{2,40})/g) || [];
+  for (const frag of m) {
+    const resto = frag.replace(/^\S+\s+/, '');
+    const tarjeta = buscarPagoFijo(resto, tarjetasActivas(), true);
+    if (tarjeta) {
+      const pal = palabrasPago(tarjeta).join('|');
+      t.quitar(new RegExp(`\\b(?:con|usando|en|por) (?:mi |la |el )?(?:tarjeta (?:de credito )?)?(?:(?:${pal})\\b\\s*)+`));
+      return { medio: 'tarjeta', tarjetaId: tarjeta.id };
+    }
+  }
+  if (t.quitar(/\b(?:en|con) efectivo\b/)) return { medio: 'efectivo' };
+  if (t.quitar(/\b(?:con|por) (?:yape|plin|debito|tarjeta de debito|transferencia)\b/)) return { medio: 'debito' };
+  return {};
+}
 
 function interpretar(texto, forzar) {
   const t = crearTexto(texto);
   const n0 = t.n;
   let tipo = forzar;
-  const pago = buscarPagoFijo(n0);
+  const medio = RE_TAREA.test(n0) ? {} : medioEnTexto(t);
+  const pago = medio.tarjetaId ? null : buscarPagoFijo(t.n);
   if (!tipo) {
-    if (RE_TAREA.test(n0)) tipo = 'tarea';
+    if (medio.tarjetaId) tipo = 'gasto';
+    else if (RE_TAREA.test(n0)) tipo = 'tarea';
     else if (pago && (RE_PAGO_VERBO.test(n0) || extraerMonto(crearTexto(texto)))) tipo = 'pagar';
     else if (extraerMonto(crearTexto(texto))) tipo = 'gasto';
     else if (/\b(gaste|compre|me costo|pague)\b/.test(n0)) tipo = 'gasto';
@@ -862,6 +1089,7 @@ function interpretar(texto, forzar) {
       fecha
     };
     if (tipo === 'pagar') return { tipo, pago, datos };
+    Object.assign(datos, medio);
     datos.categoria = buscarClave(n0, CLAVES_CATEGORIA, db.ajustes.categorias) || (db.ajustes.categorias.includes('Otros') ? 'Otros' : db.ajustes.categorias[0]);
     datos.nota = limpiarFrase(t.o).slice(0, 80);
     return { tipo: 'gasto', datos };
@@ -904,9 +1132,8 @@ function procesarVoz(texto, forzar) {
   estado.vozTexto = texto;
   const r = interpretar(texto, forzar);
   if (r.tipo === 'pagar') {
-    const ym = mesStr(new Date());
-    const e = estadoPago(r.pago, ym);
-    abrirSheet(ecoVoz(texto, 'pagar') + formPagar(r.pago, e.pagado ? sumarMes(ym, 1) : ym, r.datos));
+    const e = siguienteVencimiento(r.pago);
+    abrirSheet(ecoVoz(texto, 'pagar') + formPagar(r.pago, e ? e.ym : mesStr(new Date()), r.datos));
   } else if (r.tipo === 'gasto') {
     abrirSheet(ecoVoz(texto, 'gasto') + formGasto(null, r.datos));
   } else {
@@ -929,7 +1156,7 @@ function formVoz() {
     </button>
     <p class="muted centro" id="vozEstado">${Reconocimiento ? 'Te escucho…' : 'Este navegador no permite dictar. Escribe la frase o usa el micrófono del teclado.'}</p>
     <textarea name="texto" id="vozTexto" rows="2" placeholder="O escríbelo aquí…"></textarea>
-    <p class="small muted">Ejemplos: “Gasté 85 soles en luz” · “Ayer compré medicinas por 40 soles” · “Pagué la Visa 450” · “Recuérdame arreglar la ducha el sábado” · “Tengo que enviar el informe mañana, es urgente”</p>
+    <p class="small muted">Ejemplos: “Gasté 85 soles en luz” · “Compré zapatillas por 200 con la tarjeta iO” · “Ayer compré medicinas por 40 soles” · “Pagué la Visa 450” · “Recuérdame arreglar la ducha el sábado” · “Tengo que enviar el informe mañana, es urgente”</p>
     <div class="acciones">
       <span class="spacer"></span>
       <button type="submit" class="btn primary">Continuar</button>
@@ -1100,12 +1327,12 @@ async function descargarExcel(periodo) {
     tabla('Gastos por mes', ['Mes', 'Total (S/)', 'Registros'], filas, [null, F_S, F_N],
       (i, f) => ['Total', sumaCol('B', i, f, total), sumaCol('C', i, f, gastos.length)]);
   } else {
-    const pagos = db.pagos.filter(p => p.activo !== false || (p.pagados && p.pagados[periodo]))
-      .map(p => estadoPago(p, periodo)).sort((a, b) => a.p.dia - b.p.dia);
+    const pagos = db.pagos.filter(p => p.activo !== false || registroPago(p, periodo))
+      .map(p => estadoPago(p, periodo)).filter(e => e.aplica).sort((a, b) => a.vence.localeCompare(b.vence));
     if (pagos.length) {
-      const pagado = suma(pagos.filter(e => e.pagado).map(e => enSoles(e.gasto)));
+      const pagado = suma(pagos.map(montoPagado));
       tabla('Pagos fijos del mes', ['Pago', 'Vence', 'Estado', 'Tipo', 'Monto pagado (S/)'],
-        pagos.map(e => [e.p.nombre, fechaCorta(e.vence), e.pagado ? 'Pagado' : 'Pendiente', e.p.tipo, e.pagado ? enSoles(e.gasto) : null]),
+        pagos.map(e => [e.p.nombre, fechaCorta(e.vence), e.pagado ? 'Pagado' : e.omitido ? 'Sin pago' : 'Pendiente', e.p.tipo, e.pagado ? montoPagado(e) : null]),
         [null, null, null, null, F_S],
         (i, f) => ['Total pagado', '', '', '', sumaCol('E', i, f, pagado)]);
     }
@@ -1121,7 +1348,8 @@ async function descargarExcel(periodo) {
     { header: 'Monto original', key: 'monto', width: 16 },
     { header: 'Tipo de cambio', key: 'tc', width: 15, style: { numFmt: F_TC } },
     { header: 'Monto en S/', key: 'soles', width: 15, style: { numFmt: F_S } },
-    { header: 'Pago fijo', key: 'fijo', width: 10 }
+    { header: 'Pago fijo', key: 'fijo', width: 10 },
+    { header: 'Medio de pago', key: 'medio', width: 18 }
   ];
   wd.getRow(1).eachCell(c => {
     c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -1132,13 +1360,13 @@ async function descargarExcel(periodo) {
     const r = wd.addRow({
       fecha: new Date(Date.UTC(y, m - 1, d)),
       categoria: g.categoria, nota: g.nota || '', moneda: g.moneda === 'USD' ? 'US$' : 'S/',
-      monto: g.monto, tc: g.moneda === 'USD' ? (g.tc || tc) : null, soles: enSoles(g), fijo: g.pagoId ? 'Sí' : ''
+      monto: g.monto, tc: g.moneda === 'USD' ? (g.tc || tc) : null, soles: enSoles(g), fijo: g.pagoId ? 'Sí' : '', medio: medioTexto(g)
     });
     r.getCell('monto').numFmt = g.moneda === 'USD' ? F_U : F_S;
   });
   if (gastos.length) {
     const fin = gastos.length + 1;
-    wd.autoFilter = { from: 'A1', to: `H${fin}` };
+    wd.autoFilter = { from: 'A1', to: `I${fin}` };
     const r = wd.addRow({ categoria: 'Total', soles: { formula: `SUBTOTAL(9,G2:G${fin})`, result: total } });
     r.font = { bold: true };
     r.getCell('soles').numFmt = F_S;
@@ -1258,11 +1486,18 @@ document.addEventListener('click', e => {
     case 'pagar': abrirSheet(formPagar(db.pagos.find(p => p.id === id), ym)); break;
     case 'deshacer-pago': {
       const p = db.pagos.find(x => x.id === id);
-      if (!confirm(`¿Desmarcar el pago de ${p.nombre}? También se borrará el gasto registrado.`)) return;
-      const gid = p.pagados[ym];
-      db.gastos = db.gastos.filter(g => g.id !== gid);
+      const reg = registroPago(p, ym);
+      if (!confirm(`¿Desmarcar el pago de ${p.nombre}?${reg && reg.gastoId ? ' También se borrará el gasto registrado.' : ''}`)) return;
+      if (reg && reg.gastoId) db.gastos = db.gastos.filter(g => g.id !== reg.gastoId);
       delete p.pagados[ym];
       guardar(); render(); break;
+    }
+    case 'ajustar-mes': abrirSheet(formAjusteMes(db.pagos.find(p => p.id === id), ym)); break;
+    case 'ver-consumos': abrirSheet(formConsumos(db.pagos.find(p => p.id === id), ym)); break;
+    case 'quitar-ajuste': {
+      const p = db.pagos.find(x => x.id === id);
+      for (const k of ['montos', 'monedas', 'fechas', 'omitidos']) if (p[k]) delete p[k][ym];
+      guardar(); cerrarSheet(); toast('Ajustes del mes quitados'); render(); break;
     }
     case 'toggle-tarea': toggleTarea(id); break;
     case 'eliminar-gasto': {
@@ -1270,7 +1505,7 @@ document.addEventListener('click', e => {
       const g = db.gastos.find(x => x.id === id);
       if (g && g.pagoId) {
         const p = db.pagos.find(x => x.id === g.pagoId);
-        if (p && p.pagados) Object.keys(p.pagados).forEach(k => { if (p.pagados[k] === id) delete p.pagados[k]; });
+        if (p && p.pagados) Object.keys(p.pagados).forEach(k => { const r = p.pagados[k]; if (r === id || (r && r.gastoId === id)) delete p.pagados[k]; });
       }
       db.gastos = db.gastos.filter(x => x.id !== id);
       guardar(); cerrarSheet(); toast('Gasto eliminado'); render(); break;
@@ -1280,9 +1515,9 @@ document.addEventListener('click', e => {
       db.tareas = db.tareas.filter(x => x.id !== id);
       guardar(); cerrarSheet(); toast('Pendiente eliminado'); render(); break;
     case 'eliminar-pago':
-      if (!confirm('¿Eliminar este pago fijo? Los gastos ya registrados se conservan.')) return;
+      if (!confirm('¿Eliminar este pago? Los gastos ya registrados se conservan.')) return;
       db.pagos = db.pagos.filter(x => x.id !== id);
-      db.gastos.forEach(g => { if (g.pagoId === id) delete g.pagoId; });
+      db.gastos.forEach(g => { if (g.pagoId === id) delete g.pagoId; if (g.tarjetaId === id) delete g.tarjetaId; });
       guardar(); cerrarSheet(); toast('Pago fijo eliminado'); render(); break;
     case 'mes-gastos': estado.mesGastos = sumarMes(estado.mesGastos, Number(el.dataset.delta)); estado.busqueda = ''; render(); break;
     case 'mes-pagos': estado.mesPagos = sumarMes(estado.mesPagos, Number(el.dataset.delta)); render(); break;
@@ -1323,6 +1558,7 @@ document.addEventListener('submit', e => {
     case 'fTarea': guardarTarea(f, fd); break;
     case 'fPago': guardarPagoFijo(f, fd); break;
     case 'fPagar': registrarPago(f, fd); break;
+    case 'fAjusteMes': guardarAjusteMes(f, fd); break;
     case 'fVoz': procesarVoz(fd.texto); break;
     case 'fCompartir': if (window.Sync) window.Sync.compartir(fd.email).then(() => f.reset()); break;
     case 'fRapida': {

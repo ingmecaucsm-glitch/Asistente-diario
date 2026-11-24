@@ -149,6 +149,14 @@ button.fila.fila-main { flex-direction: row; justify-content: space-between; wid
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.danger { background: var(--danger-soft); color: var(--danger); }
 
+.fila.pago { align-items: flex-start; }
+.fila.pago .fila-der { padding-top: 2px; }
+.fila-acciones { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
+.fila-acciones .link { font-size: .78rem; padding: 2px 0; }
+.solo-tarjeta { display: none !important; }
+form:has(input[name=tipo][value=Tarjeta]:checked):has(input[name=frecuencia][value=mensual]:checked) .solo-tarjeta { display: flex !important; }
+form:has(input[name=tipo][value=Tarjeta]:checked):has(input[name=frecuencia][value=mensual]:checked) p.solo-tarjeta { display: block !important; }
+form:has(input[name=frecuencia][value=unico]:checked) .solo-mensual { display: none; }
 .tarea.hecha .fila-titulo { text-decoration: line-through; color: var(--muted); }
 .check {
   width: 28px; height: 28px; flex-shrink: 0; border-radius: 50%;
